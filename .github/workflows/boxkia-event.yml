@@ -35,7 +35,8 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: .cache
-          key: boxkia-state-v1
+          key: boxkia-event-state-v1
+          restore-keys: boxkia-event-state-v1
 
       - name: Jalankan bot (sleep-until-event)
         env:
@@ -45,8 +46,8 @@ jobs:
       - name: Bersihkan log (biar cache nggak gendut)
         run: rm -f .cache/*.log
 
-      - name: Simpan state
+      - name: Simpan state (key unik per run biar save selalu sukses)
         uses: actions/cache/save@v4
         with:
           path: .cache
-          key: boxkia-state-v1
+          key: boxkia-event-state-v1-${{ github.run_id }}
