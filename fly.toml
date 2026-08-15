@@ -1,0 +1,12 @@
+# Konfigurasi Fly.io — bot event (boxkia-bot)
+# Region "sin" = Singapore → latensi rendah ke API Jakarta (±50-80 ms).
+# Tidak ada port publik (bot cuma butuh koneksi keluar).
+app = "boxkia-bot"
+primary_region = "sin"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[mounts]
+  source = "boxkia_data"
+  destination = "/data"

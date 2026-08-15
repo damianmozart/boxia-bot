@@ -1,0 +1,11 @@
+# Konfigurasi Fly.io — watcher SP (boxkia-sp-watch)
+# Region "sin" = Singapore → latensi rendah ke API Jakarta.
+app = "boxkia-sp-watch"
+primary_region = "sin"
+
+[build]
+  dockerfile = "Dockerfile.watch"
+
+[mounts]
+  source = "boxkia_watch_data"
+  destination = "/data"

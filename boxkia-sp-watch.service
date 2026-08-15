@@ -1,0 +1,15 @@
+[Unit]
+Description=Boxkia SP monitor (roll without SP vs average rolls)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/user/boxkia-bot
+Environment=TZ=Asia/Jakarta
+ExecStart=/usr/bin/node /home/user/boxkia-bot/sp-watch.mjs
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

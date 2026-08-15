@@ -1,0 +1,11 @@
+# Token akun & konfigurasi rahasia — jangan pernah di-commit!
+# (di GitHub Actions, config.json ditulis dari Secret BOXKIA_CONFIG saat job jalan)
+config.json
+
+# Log & state runtime
+*.log
+*-state.json
+.cache/
+
+# Artifact migrasi
+boxkia-bot-migrasi.zip

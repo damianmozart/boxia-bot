@@ -1,0 +1,49 @@
+# Monitor SP Boxkia — scan tiap jam (menit 17, biar nggak bentrok sama event job).
+# Notif ⚠️/🔥/✅ dikirim ke ntfy; state dedup persist lewat cache (.cache).
+# Kalau mau scan lebih sering, ubah cron (mis. '*/15 * * * *') — tapi ingat kuota menit.
+name: boxkia-sp
+
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: boxkia-sp
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Tulis config dari Secrets
+        env:
+          BOXKIA_CONFIG: ${{ secrets.BOXKIA_CONFIG }}
+        run: echo "$BOXKIA_CONFIG" > config.json
+
+      - name: Restore state
+        uses: actions/cache/restore@v4
+        with:
+          path: .cache
+          key: boxkia-state-v1
+
+      - name: Scan SP
+        env:
+          DATA_DIR: ${{ github.workspace }}/.cache
+        run: node sp-watch.mjs --once
+
+      - name: Bersihkan log (biar cache nggak gendut)
+        run: rm -f .cache/*.log
+
+      - name: Simpan state
+        uses: actions/cache/save@v4
+        with:
+          path: .cache
+          key: boxkia-state-v1
