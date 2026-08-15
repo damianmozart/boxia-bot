@@ -56,7 +56,10 @@ const APPROACH_PCT = Number(CFG.spApproachPct) || 80;
 // spZones: notif zona beli per barang — { name, min, deep }.
 //   min  = counter masuk zona beli (notif 🟡)
 //   deep = counter lewat p90 / zona ekstrem (notif 🔴)
+// spZonesOnly: kalau true, notif ⚠️/🔥/✅ cuma dikirim untuk barang yang ada
+// di spZones — item lain di-scan tapi nggak dinotifikasi.
 const ZONES = Array.isArray(CFG.spZones) ? CFG.spZones : [];
+const ZONES_ONLY = CFG.spZonesOnly === true;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function log(...parts) {
@@ -267,6 +270,8 @@ async function watch() {
       const approachList = statuses.filter((s) => stateOf(s) === 'approach');
 
       for (const s of statuses) {
+        const inZones = ZONES.some((z) => s.name.toLowerCase().includes(String(z.name).toLowerCase()));
+        if (ZONES_ONLY && !inZones) continue; // notif cuma untuk barang di spZones
         const st = stateOf(s);
         const prev = state[s.id] || 'ok';
         if (st === prev) continue;
