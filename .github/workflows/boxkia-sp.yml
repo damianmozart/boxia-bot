@@ -4,8 +4,9 @@
 name: boxkia-sp
 
 on:
-  schedule:
-    - cron: '17 * * * *'
+  # Pemicu dari cron eksternal (cron-job.org) — cron GitHub nggak reliable.
+  repository_dispatch:
+    types: [tick]
   workflow_dispatch:
 
 concurrency:

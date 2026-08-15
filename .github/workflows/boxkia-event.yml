@@ -4,8 +4,10 @@
 name: boxkia-event
 
 on:
-  schedule:
-    - cron: '*/5 * * * *'
+  # Cron GitHub nggak reliable (delay lama / nggak jalan di repo baru) —
+  # pemicu utama pakai repository_dispatch dari cron eksternal (cron-job.org).
+  repository_dispatch:
+    types: [tick]
   workflow_dispatch: # tombol "Run workflow" buat tes manual
 
 concurrency:
