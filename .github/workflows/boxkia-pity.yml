@@ -1,0 +1,34 @@
+# Pity Board SP — kirim 📊 papan pity (roll sejak SP terakhir + statistik histori)
+# ke ntfy. Dipicu dari luar (cron-job.org) sekali sehari, atau manual via Actions tab.
+name: boxkia-pity
+
+on:
+  # Pemicu dari cron eksternal (cron-job.org) — cron GitHub nggak reliable.
+  repository_dispatch:
+    types: [pity]
+  workflow_dispatch:
+
+concurrency:
+  group: boxkia-pity
+  cancel-in-progress: false
+
+jobs:
+  pity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Tulis config dari Secrets
+        env:
+          BOXKIA_CONFIG: ${{ secrets.BOXKIA_CONFIG }}
+        run: echo "$BOXKIA_CONFIG" > config.json
+
+      - name: Pity board SP
+        env:
+          DATA_DIR: ${{ github.workspace }}/.cache
+        run: node sp-watch.mjs --pity --notify

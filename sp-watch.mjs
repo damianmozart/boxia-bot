@@ -49,6 +49,8 @@ const SP_TABS = [163, 98, 99]; // 163=高爆赏, 98=保底赏, 99=魔王赏 (101
 
 const args = new Set(process.argv.slice(2));
 const ONCE = args.has('--once');
+const PITY = args.has('--pity');
+const NOTIFY = args.has('--notify');
 const INTERVAL = Number(CFG.spWatchIntervalMs) || 300000;
 const APPROACH_PCT = Number(CFG.spApproachPct) || 80;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -117,6 +119,10 @@ async function fetchSpStatus(it) {
   ]);
   const info = g?.data?.info;
   if (!info || info.sales_num_sp == null) return null; // barang tanpa data SP / off sale
+  // histori SP terakhir: tiap entri = roll ke berapa SP keluar saat itu (pity per kejadian)
+  const hist = (ts?.data?.list || [])
+    .map((x) => Number(x.sale_num_total || 0))
+    .filter((n) => n > 0);
   return {
     id: String(it.id), // string biar konsisten dengan key JSON state file
     name: it.name,
@@ -125,7 +131,63 @@ async function fetchSpStatus(it) {
     avgSp: Number(ts?.data?.average_info?.sale_num_total || 0),
     gapA: Number(info.sales_num_a || 0),
     avgA: Number(ta?.data?.average_info?.sale_num_total || 0),
+    hist,
   };
+}
+
+/* ---------------- pity board ---------------- */
+
+function median(arr) {
+  if (!arr.length) return 0;
+  const s = [...arr].sort((a, b) => a - b);
+  const m = Math.floor(s.length / 2);
+  return s.length % 2 ? s[m] : Math.round((s[m - 1] + s[m]) / 2);
+}
+
+function pityBoard(statuses) {
+  const rows = statuses
+    .filter((s) => s.avgSp > 0) // butuh data rata-rata biar pity-nya bermakna
+    .map((s) => {
+      const pct = Math.round((s.gapSp / s.avgSp) * 100);
+      const icon = pct >= 100 ? '🔥' : pct >= APPROACH_PCT ? '⚠️' : '✅';
+      return {
+        ...s,
+        pct,
+        icon,
+        sisa: s.avgSp - s.gapSp, // perkiraan sisa roll sampai rata-rata (minus = sudah lewat)
+        med: median(s.hist),
+        min: s.hist.length ? Math.min(...s.hist) : 0,
+        max: s.hist.length ? Math.max(...s.hist) : 0,
+      };
+    })
+    .sort((a, b) => b.pct - a.pct); // paling dekat jatuh tempo di atas
+
+  const L = [];
+  L.push('📊 PITY BOARD — SP (高爆赏)');
+  L.push('Barang'.padEnd(30) + 'pity'.padStart(6) + 'rata2'.padStart(7) + 'med'.padStart(6) + 'min'.padStart(6) + 'max'.padStart(6) + '%avg'.padStart(6) + 'sisa'.padStart(6));
+  for (const r of rows) {
+    const name = r.name.length > 28 ? r.name.slice(0, 27) + '…' : r.name;
+    L.push(name.padEnd(30)
+      + String(r.gapSp).padStart(6)
+      + String(r.avgSp).padStart(7)
+      + String(r.med).padStart(6)
+      + String(r.min).padStart(6)
+      + String(r.max).padStart(6)
+      + String(r.pct).padStart(5) + '%'
+      + String(r.sisa).padStart(6)
+      + ' ' + r.icon);
+  }
+  const due = rows.filter((r) => r.pct >= 100).length;
+  const appr = rows.filter((r) => r.pct >= APPROACH_PCT && r.pct < 100).length;
+  L.push(`— ${rows.length} barang dengan data | 🔥 ${due} jatuh tempo | ⚠️ ${appr} mendekati | kolom: pity=roll sejak SP terakhir, rata2/med/min/max=statistik histori SP, %avg=progress vs rata-rata, sisa=roll tersisa sampai rata-rata`);
+  return L.join('\n');
+}
+
+async function pityMode() {
+  const statuses = await scanOnce();
+  const board = pityBoard(statuses);
+  log(board);
+  if (NOTIFY) await ntfy('📊 Boxkia: Pity Board SP', board);
 }
 
 // status item: 'ok' | 'approach' (>= spApproachPct% dari avg) | 'due' (>= 100%)
@@ -211,4 +273,8 @@ async function watch() {
   }
 }
 
-watch();
+if (PITY) {
+  pityMode().catch((e) => log('⚠ error pity:', e?.message || e));
+} else {
+  watch();
+}
