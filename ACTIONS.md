@@ -63,6 +63,11 @@ oleh **cron-job.org** (gratis, tanpa kartu) setiap 5 menit.
 - **Monitor SP:** scan tiap 5 menit (ikut pemicu yang sama), notif ⚠️/🔥/✅ +
   dedup via cache.
 - **Hasil undian 📊:** dilaporkan setelah event selesai (dedup via cache).
+- **Pity board 📊:** sekali sehari (job cron-job.org **8269426**, jam 08:00 WIB)
+  kirim papan pity SP — roll sejak SP terakhir + rata-rata/median/min/max dari
+  histori, % progress vs rata-rata, dan sisa roll. Bisa juga dipanggil manual:
+  `node sp-watch.mjs --pity --notify` (atau via Actions tab → `boxkia-pity` →
+  Run workflow).
 
 ## Catatan penting
 
