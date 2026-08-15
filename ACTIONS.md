@@ -1,8 +1,12 @@
 # Deploy ke GitHub Actions (gratis, tanpa kartu kredit) 🐙
 
-Bot jalan sebagai **workflow cron** — bukan VM. Tiap 5 menit job mengecek jadwal;
-kalau ada event mulai ≤ 6 menit lagi, job tidur sampai fast window, burst join,
-lapor hasil, lalu keluar.
+Bot jalan sebagai **workflow** di GitHub — bukan VM. Tiap 5 menit job mengecek
+jadwal; kalau ada event mulai ≤ 6 menit lagi, job tidur sampai fast window,
+burst join, lapor hasil, lalu keluar.
+
+⚠️ **Cron GitHub TIDAK dipakai** — schedule-nya tidak reliable (delay lama /
+tidak jalan di repo baru). Pemicu utama = `repository_dispatch` yang dikirim
+oleh **cron-job.org** (gratis, tanpa kartu) setiap 5 menit.
 
 ## Kenapa repo public?
 
@@ -35,12 +39,29 @@ lapor hasil, lalu keluar.
    `Login OK` 9 akun + `⏳ event berikutnya ... keluar` (kalau nggak ada event
    dalam 6 menit). Notifikasi ntfy juga bisa dicek.
 
+## Pemicu otomatis — cron-job.org (langkah terakhir, biar laptop bisa dimatikan)
+
+1. **Buat Personal Access Token** (jangan pakai token utama):
+   github.com → Settings → Developer settings → Personal access tokens →
+   Generate new token (classic) → scope: **repo** → Generate → salin.
+2. **Daftar cron-job.org** (gratis, tanpa kartu kredit) → buat **cron job baru**:
+   - Request method: **POST**
+   - URL: `https://api.github.com/repos/damianmozart/boxia-bot/dispatches`
+   - Schedule: **every 5 minutes**
+   - Header `Authorization`: `Bearer <PAT dari langkah 1>`
+   - Header `Content-Type`: `application/json`
+   - Body: `{"event_type":"tick"}`
+   - Simpan, lalu cek tab **Run history** — harusnya `HTTP 204`.
+3. Setelah cron-job.org jalan (cek: ada run baru tiap 5 menit di tab Actions),
+   **matikan dispatcher lokal** (`dispatch-ping.mjs`) — laptop bebas dimatikan.
+
 ## Setelah itu otomatis
 
-- **Bot event:** cron `*/5` → join event 10:00–21:00 otomatis, notif ✅/❌ ke
-  HP seperti biasa.
+- **Bot event:** pemicu tiap 5 menit → join event 10:00–21:00 otomatis, notif
+  ✅/❌ ke HP seperti biasa.
 - **Jadwal harian 📅:** terkirim sekali sehari (state disimpan di cache).
-- **Monitor SP:** scan tiap jam (menit 17), notif ⚠️/🔥/✅ + dedup via cache.
+- **Monitor SP:** scan tiap 5 menit (ikut pemicu yang sama), notif ⚠️/🔥/✅ +
+  dedup via cache.
 - **Hasil undian 📊:** dilaporkan setelah event selesai (dedup via cache).
 
 ## Catatan penting
