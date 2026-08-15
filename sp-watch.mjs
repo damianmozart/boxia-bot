@@ -53,6 +53,10 @@ const PITY = args.has('--pity');
 const NOTIFY = args.has('--notify');
 const INTERVAL = Number(CFG.spWatchIntervalMs) || 300000;
 const APPROACH_PCT = Number(CFG.spApproachPct) || 80;
+// spZones: notif zona beli per barang — { name, min, deep }.
+//   min  = counter masuk zona beli (notif 🟡)
+//   deep = counter lewat p90 / zona ekstrem (notif 🔴)
+const ZONES = Array.isArray(CFG.spZones) ? CFG.spZones : [];
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function log(...parts) {
@@ -214,6 +218,33 @@ async function scanOnce() {
   return statuses;
 }
 
+/* Notif zona beli: pas counter barang masuk zona (min) atau lewat deep (p90).
+ * Dedup via state.zones[id] = level (0=none, 1=zona, 2=ekstrem). Reset otomatis
+ * pas counter turun lagi (SP keluar / reset). */
+async function checkZones(statuses, state) {
+  if (!ZONES.length) return;
+  if (!state.zones) state.zones = {};
+  for (const z of ZONES) {
+    const s = statuses.find((x) => x.name.toLowerCase().includes(String(z.name).toLowerCase()));
+    if (!s) continue;
+    const prev = state.zones[s.id] || 0;
+    let lvl = 0;
+    if (s.gapSp >= (z.deep || Infinity)) lvl = 2;
+    else if (s.gapSp >= (z.min || Infinity)) lvl = 1;
+    if (lvl === prev) continue;
+    state.zones[s.id] = lvl;
+    if (lvl === 1) {
+      await ntfy('🟡 Boxkia: masuk zona beli', `${s.name} — counter ${s.gapSp} roll, masuk zona beli (≥${z.min}).${z.deep ? ` Zona ekstrem di ${z.deep} (90% kasus historis).` : ''} Siap-siap beli! (Rp ${Number(s.price).toLocaleString('id-ID')}/roll)`);
+      log(`🟡 [${s.name}] masuk zona beli — ${s.gapSp}/${z.min}`);
+    } else if (lvl === 2) {
+      await ntfy('🔴 Boxkia: zona ekstrem', `${s.name} — counter ${s.gapSp} roll, sudah melewati ${z.deep} (90% kasus historis jatuh sebelum ini). Waktu paling kritis, jangan tunggu lama! (Rp ${Number(s.price).toLocaleString('id-ID')}/roll)`);
+      log(`🔴 [${s.name}] zona ekstrem — ${s.gapSp}/${z.deep}`);
+    } else {
+      log(`↩️ [${s.name}] counter reset ke ${s.gapSp} — siap deteksi ulang`);
+    }
+  }
+}
+
 async function watch() {
   if (args.has('--reset')) {
     try { rmSync(STATE_FILE); log('🧹 State direset — notif akan mulai dari awal.'); } catch { /* belum ada file */ }
@@ -228,7 +259,8 @@ async function watch() {
       const ids = new Set(statuses.map((s) => s.id));
 
       // bersihkan state untuk barang yang sudah tidak ada di daftar (off sale)
-      for (const id of Object.keys(state)) if (!ids.has(id)) delete state[id];
+      for (const id of Object.keys(state)) if (id !== 'zones' && !ids.has(id)) delete state[id];
+      if (state.zones) for (const id of Object.keys(state.zones)) if (!ids.has(id)) delete state.zones[id];
 
       const now = new Date().toLocaleString('id-ID');
       const dueList = statuses.filter((s) => stateOf(s) === 'due');
@@ -252,6 +284,7 @@ async function watch() {
           log(`✅ [${s.name}] SP keluar — gap reset ke ${s.gapSp}`);
         }
       }
+      await checkZones(statuses, state);
       saveState(state);
 
       const line = `🔍 scan ${now} — ${statuses.length} barang | 🔥 ${dueList.length} jatuh tempo | ⚠️ ${approachList.length} mendekati`;
