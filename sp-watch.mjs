@@ -75,6 +75,7 @@ async function ntfy(title, msg) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ topic: CFG.ntfyTopic, title, message: msg }),
+      signal: AbortSignal.timeout(10000),
     });
     if (!res.ok) log(`⚠ ntfy gagal: HTTP ${res.status} (${title})`);
   } catch (e) {
@@ -236,14 +237,18 @@ async function checkZones(statuses, state) {
     else if (s.gapSp >= (z.min || Infinity)) lvl = 1;
     if (lvl === prev) continue;
     state.zones[s.id] = lvl;
-    if (lvl === 1) {
-      await ntfy('🟡 Boxkia: masuk zona beli', `${s.name} — counter ${s.gapSp} roll, masuk zona beli (≥${z.min}).${z.deep ? ` Zona ekstrem di ${z.deep} (90% kasus historis).` : ''} Siap-siap beli! (Rp ${Number(s.price).toLocaleString('id-ID')}/roll)`);
-      log(`🟡 [${s.name}] masuk zona beli — ${s.gapSp}/${z.min}`);
-    } else if (lvl === 2) {
-      await ntfy('🔴 Boxkia: zona ekstrem', `${s.name} — counter ${s.gapSp} roll, sudah melewati ${z.deep} (90% kasus historis jatuh sebelum ini). Waktu paling kritis, jangan tunggu lama! (Rp ${Number(s.price).toLocaleString('id-ID')}/roll)`);
-      log(`🔴 [${s.name}] zona ekstrem — ${s.gapSp}/${z.deep}`);
-    } else {
-      log(`↩️ [${s.name}] counter reset ke ${s.gapSp} — siap deteksi ulang`);
+    try {
+      if (lvl === 1) {
+        await ntfy('🟡 Boxkia: masuk zona beli', `${s.name} — counter ${s.gapSp} roll, masuk zona beli (≥${z.min}).${z.deep ? ` Zona ekstrem di ${z.deep} (90% kasus historis).` : ''} Siap-siap beli! (Rp ${Number(s.price).toLocaleString('id-ID')}/roll)`);
+        log(`🟡 [${s.name}] masuk zona beli — ${s.gapSp}/${z.min}`);
+      } else if (lvl === 2) {
+        await ntfy('🔴 Boxkia: zona ekstrem', `${s.name} — counter ${s.gapSp} roll, sudah melewati ${z.deep} (90% kasus historis jatuh sebelum ini). Waktu paling kritis, jangan tunggu lama! (Rp ${Number(s.price).toLocaleString('id-ID')}/roll)`);
+        log(`🔴 [${s.name}] zona ekstrem — ${s.gapSp}/${z.deep}`);
+      } else {
+        log(`↩️ [${s.name}] counter reset ke ${s.gapSp} — siap deteksi ulang`);
+      }
+    } catch (e) {
+      log(`⚠ ntfy zona gagal untuk ${s.name}: ${e?.message || e}`);
     }
   }
 }

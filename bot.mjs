@@ -108,6 +108,7 @@ async function ntfy(title, msg) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ topic: CFG.ntfyTopic, title, message: msg }),
+      signal: AbortSignal.timeout(10000),
     });
     if (!res.ok) log(`⚠ ntfy gagal: HTTP ${res.status} (${title})`);
   } catch (e) {
@@ -240,20 +241,21 @@ async function reportResult(a) {
   const seen = new Set();
   for (const dt of [0, 1]) {
     let page = 1;
-    while (page <= 5) {
+    while (page <= 10) {
       const r = await api('/activity/luckyBag/record', { params: { page, page_size: 50, id: a.id, date_type: dt } }).catch(() => null);
       if (!r || r.code !== 0 || !r.data) break;
       const list = r.data.list || [];
       for (const rec of list) {
         if (!seen.has(rec.id)) { seen.add(rec.id); all.push(rec); }
       }
-      if (list.length < 50 || (r.data.count && all.length >= r.data.count)) break;
+      if (list.length < 50) break;
       page++;
     }
     if (all.length) break;
   }
   if (!all.length) return false; // record belum terisi — coba lagi nanti
   reported.add(a.id);
+  try { saveReported(reported); } catch { /* abaikan */ }
 
   const rupiah = (v) => Number(v || 0).toLocaleString('id-ID', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const lines = ACCOUNTS.map((acct) => {
@@ -407,7 +409,7 @@ let lastOverview = 0;
 const reportRetry = new Map(); // eventId -> kapan boleh coba laporan lagi (ms)
 
 async function loopOnce(forceOverview = false) {
-  const t0 = Date.now();
+  const fetchTime = Date.now();
   let fast = false;
   let scheduleList = null;
   const bursts = [];
@@ -443,7 +445,7 @@ async function loopOnce(forceOverview = false) {
         }
         continue;
       }
-      const startsIn = (a.diff_time_start ?? 0) - (Date.now() - t0);
+      const startsIn = (a.diff_time_start ?? 0) - (Date.now() - fetchTime);
       if (a.is_progress === 1 || startsIn <= CFG.earlyFireMs) {
         bursts.push(joinBurst(a, acct, spends.get(acct.key)));
       } else if (startsIn < CFG.fastWindowMs) {
@@ -507,14 +509,12 @@ async function actionsMode() {
     .sort((a, b) => a.diff_time_start - b.diff_time_start);
 
   // lapor hasil undian untuk event yang sudah selesai & belum pernah dilaporkan
-  const reportedState = loadReported();
   for (const a of first.data.list || []) {
-    if (a.is_progress === 2 && !reportedState.has(a.id)) {
+    if (a.is_progress === 2 && !reported.has(a.id)) {
       const ok = await reportResult(a);
-      if (ok) reportedState.add(a.id);
+      // reportResult already updates `reported` + saves to disk
     }
   }
-  saveReported(reportedState);
 
   // cari event berikutnya yang masih bisa diikuti (ada akun eligible)
   const next = events.find((a) => {
@@ -600,7 +600,6 @@ async function main() {
       if (CFG.spCheckHours > 0 && Date.now() - lastSpCheck > CFG.spCheckHours * 3600e3) {
         lastSpCheck = Date.now();
         const statuses = await scanSpDue();
-        const nowDue = new Set(statuses.filter((s) => s.spDue).map((s) => s.id));
         for (const s of statuses) {
           if (s.spDue && !spNotified.has(s.id)) {
             spNotified.add(s.id);
