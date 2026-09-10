@@ -484,6 +484,14 @@ async function loopOnce(forceOverview = false) {
 const ACTIONS_HORIZON = 6 * 60 * 1000; // ms: hanya tangani event yang mulai <= 6 menit lagi (diff_time_start dalam ms)
 
 async function actionsMode() {
+  // lapor status akun ke ntfy (sekali per run biar user tahu akun mana yang konek)
+  const acctStatus = ACCOUNTS.map((a) => {
+    const u = users.get(a.key);
+    return u ? `✅ ${a.name} (LV${u.user_level})` : `❌ ${a.name} (token invalid)`;
+  });
+  const ok = ACCOUNTS.filter((a) => users.get(a.key)).length;
+  await ntfy(`🔑 Akun: ${ok}/${ACCOUNTS.length} konek`, acctStatus.join('\n'));
+
   // jadwal harian: kirim sekali sehari (state tersimpan di DATA_DIR/cache)
   const now = new Date();
   const dailyState = loadDailyState();
