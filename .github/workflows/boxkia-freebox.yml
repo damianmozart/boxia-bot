@@ -1,0 +1,34 @@
+# Daily Free Blind Box draw — khusus 3 akun (West said, Boxkia 27895, Femzy).
+# Dijalankan 2x sehari: tengah malam WIB (reset timer) dan siang WIB (jaga-jaga).
+name: boxkia-freebox
+
+on:
+  repository_dispatch:
+    types: [freebox]
+  schedule:
+    - cron: '0 17 * * *'   # 00:00 WIB (17:00 UTC) — waktu reset daily box
+    - cron: '0 6 * * *'    # 13:00 WIB (06:00 UTC) — jaga-jaga
+  workflow_dispatch:
+
+concurrency:
+  group: boxkia-freebox
+  cancel-in-progress: false
+
+jobs:
+  draw:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Tulis config dari Secrets
+        env:
+          BOXKIA_CONFIG: ${{ secrets.BOXKIA_CONFIG }}
+        run: echo "$BOXKIA_CONFIG" > config.json
+
+      - name: Draw Free Blind Box
+        run: node freebox-draw.mjs
