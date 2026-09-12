@@ -86,12 +86,12 @@ Hapus: `Unregister-ScheduledTask -TaskName 'BoxkiaSpWatch' -Confirm:$false`
 | `pollIntervalMs` | Jeda polling jadwal normal (default 2000 ms) |
 | `armWindowMs` | X ms sebelum mulai bot berhenti polling jadwal, hitung waktu tembak, lalu tidur presisi (default 20000) |
 | `minEarlyFireMs` / `maxEarlyFireMs` | Batas lead time tembakan (default 120 / 900 ms). Lead aslinya mengikuti RTT ke API × 0.6 — di cloud RTT-nya jauh lebih besar dari lokal, jadi lead-nya menyesuaikan sendiri. **`earlyFireMs` lama (3000 ms) sudah diabaikan** karena nembak 3 detik kelewat awal cuma buang putaran "not started" |
-| `joinConcurrency` | Jumlah request `join` paralel per akun (default 2). Naikkan kalau mau lebih agresif saat rebutan kuota |
+| `joinConcurrency` | Maksimum request `join` yang *in flight* per akun (default 3). Request diluncurkan satu-satu tiap `retryIntervalMs` tanpa menunggu balasan, jadi kedatangannya tersebar — bukan menggerombol lalu nganggur sepanjang RTT |
 | `joinTimeoutMs` | Timeout tiap request join (default 3000 ms) — harus < `retryMaxMs` supaya satu request macet tidak menelan seluruh burst |
 | `retryIntervalMs` | Jeda antar putaran tembakan di dalam burst (default 120 ms) |
 | `retryMaxMs` | Lama maksimal burst (default 8000 ms) |
-| `freeBoxDelayMs` | **Free box (type 0) saja**: join X ms *setelah* event dibuka (default 2000). Tujuannya supaya masuk di posisi ~20-an/30-an, bukan juara 1 — free box tidak diperebutkan. Set `0` kalau mau ikut ngebut juga |
-| `freeBoxDelayJitterMs` | Tambahan acak 0..X ms untuk free box (default 1000), biar posisinya tidak selalu persis sama |
+| `freeBoxDelayMs` | **Free box (type 0) saja**: kapan join-nya *mendarat* di server, dihitung dari waktu mulai (default 1000). Tujuannya supaya masuk di posisi ~20-an/30-an, bukan juara 1. Set `0` kalau mau ikut ngebut juga |
+| `freeBoxDelayJitterMs` | Tambahan acak 0..X ms untuk free box (default 300), biar posisinya tidak selalu persis sama |
 | `postFireCooldownMs` | Jeda santai setelah selesai nembak (default 1500 ms) — biar request jadwal berikutnya tidak ikut rebutan di detik kritis. Otomatis dipangkas kalau ada event lain yang sudah di-arm |
 | `actionsBudgetMs` | Mode `--actions`: lama satu run bertahan (default 600000 = 10 menit). **Wajib > jeda tick cron** supaya tiap event pasti ketangkep |
 | `apiTimeoutMs` | Timeout tiap request API (default 15000 ms) — mencegah fetch yang macet membekukan bot |
@@ -103,10 +103,19 @@ Kalau sudah sering "kehabisan", naikkan `joinConcurrency` ke `3` dan kecilkan
 `retryIntervalMs` ke `80`. Jangan terlalu agresif — kalau ketahuan membanjiri
 server, akun bisa kena batasan.
 
-> **Angpao vs free box.** Angpao (type 1) rebutan kuota 100 orang, jadi ditembak
-> presisi saat event dibuka. Free box (type 0) nggak perlu jadi yang pertama —
-> default-nya digeser `freeBoxDelayMs` (+ jitter) setelah mulai, jadi kamu masuk
-> di urutan 20-an/30-an.
+> **Angpao vs free box — angkanya dari data peserta asli.**
+> `node analyze-participants.mjs` membaca daftar peserta event yang sudah lewat
+> (`join_date` + `sale_num`) dan mencetak seberapa cepat kuotanya terisi.
+>
+> Hasil dari event angpao #244: **89 dari 100 slot terisi di detik ke-0**, sisanya
+> habis di detik ke-1 — jadi angpao murni balapan sub-detik dan harus ditembak
+> presisi saat event dibuka. Hasil dari free box #275 (70 slot): **21 orang di
+> detik ke-0, +15 di detik ke-1**, baru penuh pelan sampai detik ke-30-an — jadi
+> free box cukup datang sekitar 1 detik setelah mulai untuk dapat posisi 20-an/30-an.
+>
+> Angka-angka itu yang jadi dasar default `freeBoxDelayMs: 1000` dan lead
+> presisi untuk angpao. Kalau pola peserta berubah, jalankan lagi
+> `analyze-participants.mjs` lalu sesuaikan.
 
 > **Kapan bot berhenti nembak?** Begitu dapat vonis dari server: `code 0` (ikut),
 > `duplicate` (sudah ikut), `too slow / all gone` (kuota habis), `not eligible`,

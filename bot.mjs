@@ -45,11 +45,14 @@ const CFG = {
   maxEarlyFireMs: 900,         // batas atas lead adaptif (RTT dari GitHub Actions bisa 200-400ms)
   retryIntervalMs: 120,        // jeda antar putaran tembakan di dalam burst
   retryMaxMs: 8000,            // durasi maksimal burst
-  joinConcurrency: 2,          // jumlah request join PARALEL per akun (spray) — 1 = sequential
+  joinConcurrency: 3,          // maksimum request join yang "in flight" per akun
   joinTimeoutMs: 3000,         // timeout tiap request join (harus < retryMaxMs)
   armWindowMs: 20000,          // X ms sebelum mulai: berhenti polling jadwal, tidur presisi
-  freeBoxDelayMs: 2000,        // free-box (type 0): join X ms SETELAH mulai — biar masuk posisi ~20-30an, bukan ke-1
-  freeBoxDelayJitterMs: 1000,  // tambahan acak 0..X ms, biar posisinya nggak selalu persis sama
+  // free-box (type 0): target kapan join-nya MENDARAT di server, dihitung dari
+  // waktu mulai. Posisi ~20-30an tercapai di sekitar 1 detik setelah mulai
+  // (data peserta: 21 orang di detik ke-0, +15 di detik ke-1).
+  freeBoxDelayMs: 1000,        // free-box: join mendarat X ms SETELAH mulai
+  freeBoxDelayJitterMs: 300,   // tambahan acak 0..X ms, biar posisinya bervariasi
   postFireCooldownMs: 1500,    // jeda santai setelah nembak, biar nggak rebutan request list
   actionsBudgetMs: 600000,     // mode Actions: berapa lama satu run boleh bertahan (ms)
   apiTimeoutMs: 15000,         // timeout tiap request API — cegah fetch macet membekukan bot
@@ -262,22 +265,42 @@ async function tryJoin(acct, a) {
   }
 }
 
-// satu akun: spray `joinConcurrency` request paralel per putaran sampai ada vonis.
-// Paralel penting di cloud — RTT ke Jakarta dari runner US bisa 200-400ms, jadi
-// kirim 1 request lalu tunggu balasan itu lambat banget buat rebutan kuota 100 orang.
+/* Satu akun: PIPELINE, bukan batch.
+ * Data peserta nunjukin kuota angpao (100 slot) habis di detik pertama — 89 orang
+ * masuk dalam 1 detik. Jadi yang menentukan bukan "berapa banyak request", tapi
+ * "apakah ada request yang MENDARAT tepat setelah T0".
+ * Cara lama (kirim 2 sekaligus, tunggu balasan, kirim lagi) bikin request
+ * menggerombol lalu nganggur sepanjang RTT — di cloud RTT-nya 200-400ms, jadi
+ * cuma ada ~2 kesempatan per detik. Sekarang request diluncurkan satu per satu
+ * tiap `retryIntervalMs` tanpa menunggu, jadi kedatangan di server tersebar rapi
+ * melewati detik pembukaan.
+ */
+const RANK = { ok: 3, already: 2, terminal: 1 };
+
 async function joinOne(acct, a, deadline) {
-  const conc = Math.max(1, Number(CFG.joinConcurrency) || 1);
+  const maxInflight = Math.max(1, Number(CFG.joinConcurrency) || 1);
+  const interval = Math.max(40, Number(CFG.retryIntervalMs) || 120);
+  const inflight = new Set();
+  let best = null;
   let last = 'belum sempat';
-  while (Date.now() < deadline) {
-    const round = await Promise.all(Array.from({ length: conc }, () => tryJoin(acct, a)));
-    // utamakan 'ok': kalau 2 request paralel sama-sama diterima server, yang satu
-    // balik code 0 dan yang lain "duplicate" — laporannya harus tetap "ikut"
-    const decided = round.find((x) => x.kind === 'ok') || round.find((x) => x.kind !== 'retry');
-    if (decided) return decided;
-    last = round[round.length - 1]?.reason || last;
-    await sleep(CFG.retryIntervalMs);
+
+  const launch = () => {
+    const p = tryJoin(acct, a)
+      .then((res) => {
+        if (res.kind === 'retry') { last = res.reason; return; }
+        if (!best || RANK[res.kind] > RANK[best.kind]) best = res;
+      })
+      .catch(() => { /* kegagalan tak terduga: anggap retry */ })
+      .finally(() => inflight.delete(p));
+    inflight.add(p);
+  };
+
+  while (Date.now() < deadline && !best) {
+    if (inflight.size < maxInflight) launch();
+    await sleep(interval);
   }
-  return { kind: 'timeout', reason: last };
+  if (!best && inflight.size) await Promise.allSettled([...inflight]);
+  return best || { kind: 'timeout', reason: last };
 }
 
 async function fireBurst(a, accts) {
@@ -518,8 +541,9 @@ function effectiveLead() {
 }
 
 /* Free box (type 0) sengaja TIDAK direbutkan posisi pertama — diminta masuk di
- * posisi 20-an/30-an, jadi tembakannya digeser `freeBoxDelayMs` ms SETELAH event
- * dibuka (plus jitter acak). Angpao (type 1) tetap tembak presisi saat dibuka. */
+ * posisi 20-an/30-an, jadi join-nya dijadwalkan MENDARAT `freeBoxDelayMs` ms
+ * setelah event dibuka (plus jitter acak). Angpao (type 1) tetap tembak presisi
+ * saat dibuka karena kuotanya habis dalam <1 detik. */
 function freeBoxDelay() {
   const base = Math.max(0, Number(CFG.freeBoxDelayMs) || 0);
   const jitter = Math.max(0, Number(CFG.freeBoxDelayJitterMs) || 0);
@@ -606,9 +630,10 @@ async function loopOnce(forceOverview = false) {
     if (startsIn < soonestStartsIn) soonestStartsIn = startsIn;
     if (a.is_progress === 1) { fireNow.push(fireBurst(a, accts)); continue; }
 
-    // angpao: negatif = tembak SEBELUM mulai (lead). free box: positif = tembak
-    // SESUDAH mulai (delay), biar posisinya di belakang dikit, bukan juara 1.
-    const offset = a.type === 0 ? freeBoxDelay() : -lead;
+    // free box: offset = "mendarat X ms setelah mulai" dikurangi RTT, supaya
+    // waktu MENDARAT-nya yang presisi (posisi ditentukan saat server menerima,
+    // bukan saat kita mengirim). angpao: tembak sebelum mulai (lead).
+    const offset = a.type === 0 ? freeBoxDelay() - (LAST_RTT_MS || 0) : -lead;
     const target = startsIn + offset;
     if (target <= 0) {
       fireNow.push(fireBurst(a, accts));
