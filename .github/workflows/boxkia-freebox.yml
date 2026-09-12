@@ -1,14 +1,22 @@
 # Daily Free Blind Box draw — khusus 3 akun (West said, Boxkia 27895, Femzy).
 # Reset box itu 24 jam BERGULIR dari draw terakhir tiap akun (bukan jam 00:00
-# global), jadi cron-nya jalan TIAP JAM. Script-nya sendiri cuma notif kalau
-# ada yang benar-benar di-draw — run yang cuma ngecek itu diam.
+# global), jadi pengecekannya harus sering.
+#
+# Pemicu utama: tick 5 menit dari cron-job.org (event_type 'tick'). Cron bawaan
+# GitHub dipakai sebagai cadangan saja: cron tepat di menit :00 itu slot paling
+# padat sedunia dan GitHub memang MENDIAMKAN run terjadwal saat antrean berat —
+# kejadian nyata: 3 jam tanpa run sama sekali. Jadi cadangannya digeser ke menit
+# sepi (menit 23).
+#
+# Aman dijalankan sesering apa pun: script-nya cuma DRAW kalau box-nya benar-benar
+# siap (status 1) dan cuma kirim notif kalau ada yang menang atau ada error.
 name: boxkia-freebox
 
 on:
   repository_dispatch:
-    types: [freebox]
+    types: [tick, freebox]
   schedule:
-    - cron: '0 * * * *'    # tiap jam — nangkep semua jam reset akun
+    - cron: '23 * * * *'   # cadangan — menit sepi, hindari antrean menit :00
   workflow_dispatch:
 
 concurrency:
