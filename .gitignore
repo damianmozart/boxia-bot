@@ -2,9 +2,10 @@
 # (di GitHub Actions, config.json ditulis dari Secret BOXKIA_CONFIG saat job jalan)
 config.json
 
-# Log & state runtime
+# Log & state runtime (dibuat bot saat jalan — jangan pernah di-commit)
 *.log
 *-state.json
+reported-events.json
 .cache/
 
 # Artifact migrasi
