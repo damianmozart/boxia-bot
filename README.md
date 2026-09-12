@@ -98,8 +98,8 @@ Hapus: `Unregister-ScheduledTask -TaskName 'BoxkiaSpWatch' -Confirm:$false`
 | `postFireCooldownMs` | Jeda santai setelah selesai nembak (default 1500 ms) — biar request jadwal berikutnya tidak ikut rebutan di detik kritis. Otomatis dipangkas kalau ada event lain yang sudah di-arm |
 | `actionsBudgetMs` | Mode `--actions`: lama satu run bertahan (default 600000 = 10 menit). **Wajib > jeda tick cron** supaya tiap event pasti ketangkep |
 | `apiTimeoutMs` | Timeout tiap request API (default 15000 ms) — mencegah fetch yang macet membekukan bot |
-| `ntfyTopic` | Topic ntfy.sh (opsional) untuk notifikasi ke HP saat berhasil/gagal, plus laporan hasil undian setelah event selesai (`🏆 … MENANG Rp …` atau `📊 … belum ada yang menang`) berisi posisi tiap akun, jam join relatif ke waktu mulai (`T+0s`), dan berapa yang didapat masing-masing — dan laporan saldo (`💰 Saldo …`) saat bot start & tiap heartbeat |
-| `waitResultMs` | Setelah nembak, bot menunggu hasil undian muncul lalu mengirim laporan posisi + berapa yang didapat (default 180000 = 3 menit). Laporan dikirim **menang maupun tidak** — bisa dipicu manual dengan `node bot.mjs --hasil` |
+| `ntfyTopic` | Topic ntfy.sh (opsional) untuk notifikasi ke HP saat berhasil/gagal, plus laporan hasil undian setelah event selesai (`💰 …: N akun dapat Rp …` atau `📊 … belum ada yang dapat`) berisi posisi tiap akun (`posisi N/total`), jam join relatif ke waktu mulai (`T+0s`), dan **berapa yang didapat masing-masing** — dan laporan saldo (`💰 Saldo …`) saat bot start & tiap heartbeat |
+| `waitResultMs` | Setelah nembak, bot menunggu hasil undian muncul lalu mengirim laporan posisi + berapa yang didapat (default 180000 = 3 menit). Laporan dikirim **menang maupun tidak** — bisa dipicu manual dengan `node bot.mjs --hasil`. Kalau record hari itu belum ada, bot **menunggu dan mencoba lagi**, bukan memakai record hari lain |
 | `spCheckHours` | **Scanner SP otomatis** — kalau > 0 (mis. `1`), bot mengecek tiap X jam apakah ada barang yang SP-nya "jatuh tempo" (roll tanpa SP sudah melewati rata-rata) dan kirim notif `🔥` ke ntfy. Default `0` = mati |
 | `dailyScheduleHour` | Jam (0–23) kirim **ringkasan jadwal hari ini** (`📅`) ke ntfy — daftar event + akun mana yang memenuhi syarat (elig). Default `0` = tengah malam. Bisa kirim manual kapan saja dengan `node bot.mjs --jadwal` |
 
@@ -120,6 +120,27 @@ server, akun bisa kena batasan.
 > Angka-angka itu yang jadi dasar default `freeBoxDelayMs: 1000` dan lead
 > presisi untuk angpao. Kalau pola peserta berubah, jalankan lagi
 > `analyze-participants.mjs` lalu sesuaikan.
+
+> **Arti "dapat berapa" di laporan hasil undian** (jangan ketuker — dua tipe event
+> ini beda aturan):
+> - **Angpao (type 1):** kolam (`price`) dibagi ke **semua** peserta. Tiap peserta
+>   dapat bagian acak, dan jumlah semua `amount` = `price`. Contoh angpao #244:
+>   `price` 600.000 dibagi 100 peserta → dapat Rp 44 s/d Rp 17.057 per orang.
+>   Jadi peserta angpao **selalu dapat**, `is_win = 1` cuma menandai bagian terbesar.
+> - **Free box (type 0):** hadiah jatuh ke **satu** pemenang. Yang lain `amount` 0
+>   (notifikasinya `dapat Rp 0` — memang benar).
+>
+> Karena itu laporan menghitung "didapat" dari `amount`, bukan dari `is_win`.
+
+> **Jangan sampai laporan ketuker harinya.** Endpoint `luckyBag/record` memisahkan
+> hasil per hari lewat `date_type` (`0` = hari ini, `1` = kemarin), sementara id
+> event dipakai ulang tiap hari. Dulu bot mencoba `date_type=0` lalu **jatuh ke
+> `date_type=1`** kalau record hari ini belum terisi — akibatnya notifikasi
+> menampilkan **posisi & hasil kemarin** sebagai hasil event hari ini (posisi
+> "1,11,5,4,13…" padahal yang benar "6,7,9,10,11…"). Sekarang bot memilih
+> `date_type` dari waktu mulai event (`diff_time_start`) dan **menunggu lalu
+> mencoba lagi** kalau record hari itu belum ada — tidak pernah memakai hari lain.
+> Laporan juga menuliskan harinya secara eksplisit: `(hari ini)` / `(kemarin)`.
 
 > **Kapan bot berhenti nembak?** Begitu dapat vonis dari server: `code 0` (ikut),
 > `duplicate` (sudah ikut), `too slow / all gone` (kuota habis), `not eligible`,

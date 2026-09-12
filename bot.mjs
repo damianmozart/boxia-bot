@@ -116,6 +116,26 @@ function parseAccounts() {
 }
 
 const ACCOUNTS = parseAccounts();
+
+/* Buang akun kembar (user_id sama). Config pernah memuat akun yang sama dua kali:
+ * efeknya satu akun "makan" satu slot tembakan, dan laporan hasil menampilkan
+ * akun kembar dengan posisi identik seolah-olah dua akun berbeda. Dipanggil
+ * sesudah login (user_id baru diketahui dari API). */
+function dropDuplicateAccounts() {
+  const seen = new Map();
+  for (let i = ACCOUNTS.length - 1; i >= 0; i--) {
+    const a = ACCOUNTS[i];
+    const uid = users.get(a.key)?.user_id;
+    if (uid == null) continue;
+    if (seen.has(String(uid))) {
+      const first = seen.get(String(uid));
+      ACCOUNTS.splice(i, 1);
+      log(`⚠ akun duplikat: [${a.name}] (user_id ${uid}) sama dengan [${first}] — dikeluarkan dari daftar.`);
+    } else {
+      seen.set(String(uid), a.name);
+    }
+  }
+}
 const users = new Map();     // key -> userInfo
 const spends = new Map();    // key -> user_spend_amount hari ini
 const attempted = new Map(); // key -> Set(eventId)
@@ -372,35 +392,79 @@ function secAfterStart(a, joinDate) {
   return s == null || t0 == null ? null : s - t0;
 }
 
-// Daftar peserta + status menang + amount. Coba hari ini (0) dulu, baru kemarin (1).
-async function fetchRecords(id) {
+/* Kapan event ini mulai (instan absolut). `start_time` cuma jam ("09:00 PM") dan
+ * id event dipakai ulang tiap hari, jadi waktu mulai harus dihitung dari
+ * `diff_time_start` (ms relatif ke sekarang; negatif kalau sudah lewat). */
+function eventStartAt(a) {
+  const d = Number(a?.diff_time_start);
+  return Number.isFinite(d) ? Date.now() + d : null;
+}
+
+/* Record API memisahkan hari lewat `date_type`: 0 = hari ini, 1 = kemarin.
+ * Salah pilih = laporan menampilkan hasil undian HARI LAIN sebagai hasil event
+ * ini (kejadian nyata: hasil angpao #244 dilaporkan pakai posisi kemarin).
+ * null = lebih tua dari kemarin, nggak ada date_type-nya. */
+function dateTypeOf(a) {
+  const at = eventStartAt(a);
+  if (at == null) return 0;
+  const days = Math.round((dayStart(Date.now()) - dayStart(at)) / 86400000);
+  if (days <= 0) return 0;          // mulai hari ini (atau belum mulai)
+  return days === 1 ? 1 : null;     // kemarin
+}
+
+function dayStart(ms) {
+  const d = new Date(ms);
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
+}
+
+/* Kunci laporan per event PER HARI. Id event dipakai ulang tiap hari, jadi kalau
+ * dikunci pakai id saja, event slot yang sama besok dianggap "sudah dilaporkan"
+ * dan laporannya hilang. */
+function reportKey(a) {
+  const at = eventStartAt(a);
+  return `${a.id}@${new Date(at == null ? dayStart(Date.now()) : dayStart(at)).toLocaleDateString('id-ID')}`;
+}
+
+/* Daftar peserta + hasil undian untuk SATU hari tertentu. Tidak ada fallback ke
+ * hari lain: kalau record hari itu belum ada, kembalikan kosong supaya pemanggil
+ * mencoba lagi — bukan melaporkan data kemarin sebagai hasil hari ini. */
+async function fetchRecords(id, dateType) {
   const acct = anyAccount();
   const all = [];
   const seen = new Set();
-  for (const dt of [0, 1]) {
-    for (let page = 1; page <= 10; page++) {
-      const r = await api('/activity/luckyBag/record', { account: acct, params: { page, page_size: 50, id, date_type: dt } }).catch(() => null);
-      if (!r || r.code !== 0 || !r.data) break;
-      const list = r.data.list || [];
-      for (const rec of list) if (!seen.has(rec.id)) { seen.add(rec.id); all.push(rec); }
-      if (list.length < 50) break;
-    }
-    if (all.length) break;
+  for (let page = 1; page <= 10; page++) {
+    const r = await api('/activity/luckyBag/record', { account: acct, params: { page, page_size: 50, id, date_type: dateType } }).catch(() => null);
+    if (!r || r.code !== 0 || !r.data) break;
+    const list = r.data.list || [];
+    for (const rec of list) if (!seen.has(rec.id)) { seen.add(rec.id); all.push(rec); }
+    if (list.length < 50) break;
   }
   return all;
 }
 
-/* Laporan hasil undian: posisi TIAP akun + berapa yang didapat, menang atau tidak.
- * Record punya `sale_num` (posisi masuk) dan `amount` (yang didapat; 0 kalau zonk),
- * jadi notifikasi ini sekaligus jadi umpan balik apakah timing tembakan kita efektif. */
+/* Laporan hasil undian: posisi TIAP akun + berapa yang didapat.
+ *
+ * `sale_num` = posisi masuk (1 = paling awal). `amount` = uang yang DIDAPAT akun
+ * itu, dan artinya beda per tipe event:
+ *   - angpao (type 1): kolam (`price`) dibagi ke SEMUA peserta → tiap peserta
+ *     dapat bagian acak, dan jumlah semua `amount` = `price`. `is_win` cuma
+ *     menandai bagian terbesar. Jadi "dapat Rp 0" untuk peserta angpao itu SALAH.
+ *   - free-box (type 0): hadiah jatuh ke satu pemenang → yang lain `amount` 0.
+ * Karena itu "didapat" dihitung dari `amount`, bukan dari `is_win`. */
 async function reportResult(a) {
-  const all = await fetchRecords(a.id);
-  if (!all.length) return false; // record belum terisi — coba lagi nanti
-  reported.add(a.id);
+  const dt = dateTypeOf(a);
+  if (dt == null) return true;                       // lebih tua dari kemarin — di luar jangkauan record
+  const all = await fetchRecords(a.id, dt);
+  if (!all.length) return false;                     // hari itu belum ada record → coba lagi, jangan pakai hari lain
+  reported.add(reportKey(a));
   try { saveReported(reported); } catch { /* abaikan */ }
 
   const total = all.length;
-  let wonTotal = 0, wonCount = 0, joined = 0, bestPos = Infinity;
+  const quota = Number(a.join_user_limit) || 0;
+  const endsIn = Number(a.diff_time_end);
+  const ended = Number.isFinite(endsIn) && endsIn <= 0;
+  let gotTotal = 0, gotCount = 0, joined = 0, bestPos = Infinity;
   const rows = ACCOUNTS.map((acct) => {
     const u = users.get(acct.key);
     if (!u) return `• ${acct.name} — token mati`;
@@ -409,27 +473,34 @@ async function reportResult(a) {
     joined++;
     const pos = Number(rec.sale_num) || 0;
     if (pos) bestPos = Math.min(bestPos, pos);
-    const dt = secAfterStart(a, rec.join_date);
-    const at = dt == null ? '' : ` · T+${dt}s`;
+    const dsec = secAfterStart(a, rec.join_date);
+    const at = dsec == null || dsec < 0 || dsec > 600 ? '' : ` · T+${dsec}s`;
     const amt = Number(rec.amount || 0);
-    if (rec.is_win == 1) {
-      wonCount++;
-      wonTotal += amt;
-      return `• ${acct.name} — posisi ${pos}/${total}${at} · 🏆 DAPAT Rp ${rupiah(amt)}`;
-    }
-    return `• ${acct.name} — posisi ${pos}/${total}${at} · dapat Rp 0`;
+    if (amt > 0) { gotCount++; gotTotal += amt; }
+    const prize = (a.user_list || []).find((w) => String(w.user_id) === String(u.user_id))?.goods_name;
+    const badge = rec.is_win == 1
+      ? (a.type === 0 ? ` 🏆 MENANG${prize ? ' ' + prize : ''}` : ' 🏆 share terbesar')
+      : '';
+    return `• ${acct.name}${badge} — posisi ${pos}/${total}${at} · dapat Rp ${rupiah(amt)}`;
   });
 
+  // Hasil undian kadang belum final walau daftar record-nya sudah ada (pemenang
+  // free-box baru ditentukan menjelang/akhir event). Jangan lapor "belum ada yang
+  // dapat" padahal hadiahnya belum diundi: biarkan pemanggil mencoba lagi — dan
+  // JANGAN tandai sudah dilaporkan, supaya bisa dilaporkan di tick berikutnya.
+  if (gotTotal === 0 && joined > 0 && !ended) return false;
+
   const label = TYPE_NAME[a.type] || `type${a.type}`;
-  const title = wonCount
-    ? `🏆 ${label}: ${wonCount} akun MENANG Rp ${rupiah(wonTotal)}`
-    : `📊 ${label}: belum ada yang menang`;
-  const head = `${label} #${a.id} · ${a.start_time} · ${total} peserta · ${joined}/${ACCOUNTS.length} akun masuk`;
-  const tail = wonCount
-    ? `\n💰 Total didapat: Rp ${rupiah(wonTotal)}`
-    : (Number.isFinite(bestPos) ? `\nPosisi terbaik kita: #${bestPos}/${total}` : '');
-  const msg = `${head}\n${rows.join('\n')}${tail}`;
-  log(msg);
+  const title = gotTotal > 0
+    ? `💰 ${label}: ${gotCount} akun dapat Rp ${rupiah(gotTotal)}`
+    : `📊 ${label}: belum ada yang dapat`;
+  const head = `${label} #${a.id} · ${a.start_time} (${dt === 0 ? 'hari ini' : 'kemarin'}) · peserta ${total}${quota ? `/${quota}` : ''} · ${joined}/${ACCOUNTS.length} akun masuk`;
+  const tail = [
+    gotTotal > 0 ? `💰 Total didapat: Rp ${rupiah(gotTotal)}` : '',
+    Number.isFinite(bestPos) ? `Posisi terbaik kita: #${bestPos}/${total}` : '',
+  ].filter(Boolean).join('\n');
+  const msg = `${head}\n${rows.join('\n')}${tail ? '\n' + tail : ''}`;
+  log(`${title}\n${msg}`);
   await ntfy(title, msg);
   return true;
 }
@@ -445,7 +516,7 @@ async function collectResults(budgetEnd = Infinity) {
     let pending = !list;
     if (list) {
       for (const a of list) {
-        if (!attemptedAny.has(a.id) || reported.has(a.id)) continue;
+        if (!attemptedAny.has(a.id) || reported.has(reportKey(a))) continue;
         if (!(await reportResult(a))) pending = true;
       }
     }
@@ -727,7 +798,7 @@ async function loopOnce(forceOverview = false) {
   const criticalWindow = armed.size > 0 || soonestStartsIn <= CFG.armWindowMs;
   if (scheduleList && !criticalWindow) {
     for (const a of scheduleList) {
-      if (attemptedAny.has(a.id) && a.is_progress === 2 && !reported.has(a.id) && Date.now() >= (reportRetry.get(a.id) ?? 0)) {
+      if (attemptedAny.has(a.id) && a.is_progress === 2 && !reported.has(reportKey(a)) && Date.now() >= (reportRetry.get(a.id) ?? 0)) {
         const ok = await reportResult(a);
         if (!ok) reportRetry.set(a.id, Date.now() + 60000);
       }
@@ -835,6 +906,10 @@ async function main() {
     return;
   }
 
+  // muat riwayat laporan dari disk — tanpa ini, restart bot bikin event yang
+  // sudah dilaporkan terkirim ulang ke HP.
+  for (const k of loadReported()) reported.add(k);
+
   for (const acct of ACCOUNTS) {
     const u = await fetchUserInfo(acct).catch(() => null);
     users.set(acct.key, u);
@@ -847,6 +922,7 @@ async function main() {
       log(`⚠ [${acct.name}] token tidak valid/kedaluwarsa — join akan ditolak (code 10003).`);
     }
   }
+  dropDuplicateAccounts();
 
   if (args.has('--saldo')) { await reportBalances(); return; }
   if (args.has('--sp')) { await scanSpDue(); return; }
@@ -856,12 +932,15 @@ async function main() {
     const wantId = Number([...args].find((x) => /^\d+$/.test(x))) || null;
     let list = [];
     try { list = (await loadSchedule(ACCOUNTS[0])).list || []; } catch { /* abaikan */ }
-    const ev = wantId
-      ? (list.find((x) => x.id === wantId) || { id: wantId, type: 1, start_time: '--' })
-      : list.filter((x) => x.is_progress === 2).sort((a, b) => b.diff_time_start - a.diff_time_start)[0];
-    if (!ev) { log('⚠ Tidak ada event yang selesai hari ini. Pakai: node bot.mjs --hasil <id>'); return; }
-    const ok = await reportResult(ev);
-    if (!ok) log(`⚠ Record #${ev.id} masih kosong (undian belum kelar / nggak ada peserta).`);
+    const candidates = wantId
+      ? [list.find((x) => x.id === wantId) || { id: wantId, type: 1, start_time: '--' }]
+      : list.filter((x) => x.is_progress === 2).sort((a, b) => b.diff_time_start - a.diff_time_start).slice(0, 4);
+    if (!candidates.length) { log('⚠ Tidak ada event yang selesai hari ini. Pakai: node bot.mjs --hasil <id>'); return; }
+    // coba dari event terbaru; kalau record-nya belum ada, mundur ke event sebelumnya
+    for (const ev of candidates) {
+      if (await reportResult(ev)) return;
+      log(`⚠ #${ev.id} hasilnya belum final (record belum ada / undian belum jalan) — coba event sebelumnya.`);
+    }
     return;
   }
 

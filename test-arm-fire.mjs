@@ -9,10 +9,17 @@
 //       (b) join pertama mendarat dekat T0
 import http from 'node:http';
 import { spawn } from 'node:child_process';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 
 const PORT = 8099;
 const T0 = Date.now() + 6000;
 const FREEBOX_DELAY_MS = 2500;
+// State bot (log + reported-events.json) diarahkan ke folder sementara: tanpa ini
+// run kedua langsung "sudah dilaporkan" dari file run pertama dan laporan nggak
+// pernah dikirim — test jadi flaky.
+const DATA_DIR = mkdtempSync(path.join(tmpdir(), 'boxkia-arm-'));
 const log = [];
 let listCalls = [];
 const joinFirstAt = new Map();
@@ -84,15 +91,18 @@ const server = http.createServer((req, res) => {
       return res.writeHead(200, JSON_H).end(JSON.stringify(joinResult(tok, id)));
     }
     if (url.includes('/activity/luckyBag/record')) {
-      // Daftar peserta palsu: tiap akun dapat posisi + status menang + amount,
-      // supaya laporan hasil undian bisa ikut diverifikasi.
+      // Daftar peserta palsu, dibedakan per tipe seperti API asli:
+      //   angpao (#999)  : SEMUA peserta dapat bagian (is_win cuma penanda share terbesar)
+      //   free-box (#1001): hadiah jatuh ke satu pemenang, sisanya amount 0
+      const evId = Number(new URL(url, `http://127.0.0.1:${PORT}`).searchParams.get('id'));
+      const isAngpao = evId === 999;
       const list = [...userByToken.entries()].map(([, uid], i) => ({
         id: 5000 + i,
         user_id: uid,
-        is_win: i % 3 === 0 ? 1 : 0,
+        is_win: isAngpao ? (i === 0 ? 1 : 0) : (i % 3 === 0 ? 1 : 0),
         join_date: '01:00:02 PM',
         sale_num: (i * 7) % 60 + 1,
-        amount: i % 3 === 0 ? '350000.00' : '0.00',
+        amount: isAngpao ? '4500.00' : (i % 3 === 0 ? '350000.00' : '0.00'),
         user_nickname: `mock${i}`,
       }));
       return res.writeHead(200, JSON_H).end(JSON.stringify({ code: 0, data: { list, count: list.length } }));
@@ -120,6 +130,7 @@ function run() {
         ...process.env,
         BOXKIA_API_BASE: `http://127.0.0.1:${PORT}`,
         BOXKIA_NTFY_TOPIC: '',
+        DATA_DIR,
         ACTIONS_BUDGET_MS: '60000',
         BOXKIA_FREEBOX_DELAY_MS: String(FREEBOX_DELAY_MS),
         BOXKIA_FREEBOX_JITTER_MS: '0',
@@ -152,6 +163,14 @@ server.listen(PORT, '127.0.0.1', async () => {
   const listInCritical = listCalls.filter((t) => t >= critStart && t <= critEnd).length;
   const lastListBefore = listCalls.filter((t) => t < critStart).length;
 
+  // blok teks laporan tiap event, biar check-nya nggak ketuker antar tipe event
+  const blockOf = (marker) => {
+    const i = out.indexOf(marker);
+    return i < 0 ? '' : out.slice(i).split('\n').slice(0, 12).join('\n');
+  };
+  const angReport = blockOf('angpao #999 · MOCK');
+  const freeReport = blockOf('free-box #1001 · MOCK');
+
   const checks = [
     ['event di-arm', /🛡 arm angpao #999/.test(out)],
     ['tidur presisi (bukan fast-poll)', /💤 tidur presisi/.test(out)],
@@ -169,8 +188,12 @@ server.listen(PORT, '127.0.0.1', async () => {
     ['free box lebih lambat dari angpao', freeT0 != null && angpaoT0 != null && freeT0 > angpaoT0],
     ['event jauh → keluar cepat (bukan nyangkut sampai budget)', /budget tersisa/.test(out) && run_.exitAt - T0 < 8000],
     ['laporan hasil undian terkirim dengan POSISI tiap akun', /posisi \d+\/\d+/.test(out)],
-    ['laporan menyebut berapa yang DIDAPAT', /DAPAT Rp |dapat Rp 0/.test(out)],
+    ['laporan menyebut berapa yang DIDAPAT', /dapat Rp \d/.test(out)],
     ['laporan menghitung total kemenangan', /Total didapat|Posisi terbaik/.test(out)],
+    // angpao: bagian yang didapat SEMUA peserta harus dihitung, bukan cuma is_win
+    ['angpao menghitung bagian semua peserta', /💰 angpao: 9 akun dapat Rp 40\.500,00/.test(out)],
+    ['angpao: tiap akun dapat bagian (bukan Rp 0)', /dapat Rp 4\.500,00/.test(angReport) && !/dapat Rp 0,00/.test(angReport)],
+    ['free-box: yang bukan pemenang tetap Rp 0', /dapat Rp 0,00/.test(freeReport)],
   ];
   console.log('\n=== hasil verifikasi ===');
   let bad = 0;
@@ -183,5 +206,6 @@ server.listen(PORT, '127.0.0.1', async () => {
   console.log(`free-box #1001 join pertama: ${freeT0 == null ? 'n/a' : (freeT0 - T0) + 'ms'} (${joinByEvent.get(1001)?.tokens.size ?? 0} akun), delay diminta ${FREEBOX_DELAY_MS}ms`);
   console.log(bad ? `\n❌ ${bad} check gagal` : '\n✅ SEMUA CHECK LULUS');
   server.close();
+  try { rmSync(DATA_DIR, { recursive: true, force: true }); } catch { /* abaikan */ }
   process.exit(bad ? 1 : 0);
 });
