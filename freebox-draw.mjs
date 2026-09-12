@@ -149,7 +149,8 @@ async function main() {
 
   // Notif HANYA kalau ada sesuatu yang benar-benar terjadi (atau diminta paksa).
   // Cron jalan tiap jam; kalau tiap run kirim notif, HP bakal spam 24x sehari.
-  const worthNotifying = NOTIFY_ALL || won.length || ready.length || errors.length || CHECK_ONLY;
+  // `--check` itu alat diagnostik — cukup tampil di terminal, jangan ping HP.
+  const worthNotifying = NOTIFY_ALL || won.length > 0 || errors.length > 0;
   const head = won.length
     ? `🎁 Free Box: ${won.length} MENANG!`
     : ready.length

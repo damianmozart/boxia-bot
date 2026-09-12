@@ -23,6 +23,7 @@
  *   node bot.mjs --saldo      — tampilkan saldo & poin tiap akun, lalu keluar
  *   node bot.mjs --sp         — scan barang SP & cek "roll tanpa SP" vs "avg rolls" (due checker)
  *   node bot.mjs --jadwal     — kirim ringkasan jadwal hari ini + akun yang bisa ikut ke ntfy
+ *   node bot.mjs --notif-test — kirim 1 notifikasi tes ke ntfy, lalu keluar
  *   node bot.mjs --actions    — mode GitHub Actions (single-shot): selama budget
  *                                (actionsBudgetMs) bot menunggu presisi lalu join,
  *                                habis itu keluar — tick berikutnya lanjut lagi
@@ -739,6 +740,16 @@ async function actionsMode() {
 /* ---------------- main ---------------- */
 
 async function main() {
+  // Tes jalur notifikasi — sengaja di paling atas supaya tetap bisa dipakai
+  // walau config.json belum ada token yang valid.
+  if (args.has('--notif-test')) {
+    if (!CFG.ntfyTopic) { log('⚠ ntfyTopic kosong di config.json — notifikasi mati.'); return; }
+    const stamp = new Date().toLocaleString('id-ID');
+    await ntfy('🔔 Boxkia: tes notifikasi', `Tes jalur notifikasi — ${stamp}\nTopic: ${CFG.ntfyTopic}\nKalau pesan ini masuk ke HP, jalur notif sehat.`);
+    log(`🔔 Notif tes dikirim ke topic "${CFG.ntfyTopic}" — cek HP.`);
+    return;
+  }
+
   if (!ACCOUNTS.length) {
     log('⚠ Tidak ada akun: isi "token" (atau daftar "accounts") di config.json.');
     return;
