@@ -8,10 +8,12 @@ on:
   # Pemicu utama: repository_dispatch dari cron eksternal (cron-job.org).
   repository_dispatch:
     types: [tick]
-  # Cadangan kalau cron-job.org mati. Cron GitHub memang suka telat, tapi dengan
-  # budget 10 menit telat beberapa menit pun masih ketangkep.
+  # Cadangan kalau cron-job.org mati. Sengaja jarang (15 menit), bukan 5 menit:
+  # satu run bisa nyala sampai 10 menit, jadi trigger yang terlalu rapat cuma
+  # bikin run saling ngantre di concurrency group (GitHub pun membatalkan yang
+  # ngantre) tanpa menambah peluang event ketangkep.
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: '*/15 * * * *'
   workflow_dispatch: # tombol "Run workflow" buat tes manual
 
 concurrency:
