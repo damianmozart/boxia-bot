@@ -664,13 +664,17 @@ async function actionsMode() {
     if (left <= 0) { log('⏳ budget sesi habis — keluar'); break; }
 
     const st = await loopOnce();
-    if (st.hasTarget || st.armedCount) { await sleep(200); continue; }
+    if (st.armedCount) { await sleep(200); continue; }
     if (!Number.isFinite(st.soonestStartsIn)) { log('✅ tidak ada event target tersisa hari ini — keluar'); break; }
+    // Target jauh di luar budget: keluar SEKARANG. Kalau tidak, run-nya cuma
+    // muter-muter polling sampai budget habis (dulu ini bikin run nyangkut 10 menit).
     if (st.soonestStartsIn > left) {
       log(`⏳ event berikutnya ${Math.round(st.soonestStartsIn / 1000)}s lagi (budget tersisa ${Math.round(left / 1000)}s) — keluar, tick berikutnya yang lanjut`);
       break;
     }
-    await sleep(Math.min(2000, st.soonestStartsIn));
+    // Tidur sampai event mau masuk arm window (di-cap 60s biar jadwal baru cepat
+    // ketahuan) — jauh lebih hemat daripada polling tiap 2 detik selama menit-menitan.
+    await sleep(Math.max(200, Math.min(st.soonestStartsIn - CFG.armWindowMs, left, 60000)));
   }
 
   log('✅ sesi Actions selesai');

@@ -24,11 +24,20 @@ function schedule() {
     msg: 'ok',
     data: {
       activity_info: { user_spend_amount: '0.00' },
-      list: [{
-        id: 999, type: 1, start_time: 'MOCK 01:00 PM', is_progress: 0, is_join: 0,
-        join_total: 0, join_user_limit: 100, limit_price: 0, level_limit: 0,
-        diff_time_start: Math.max(0, T0 - Date.now()),
-      }],
+      list: [
+        {
+          id: 999, type: 1, start_time: 'MOCK 01:00 PM', is_progress: 0, is_join: 0,
+          join_total: 0, join_user_limit: 100, limit_price: 0, level_limit: 0,
+          diff_time_start: Math.max(0, T0 - Date.now()),
+        },
+        {
+          // event jauh (20 menit lagi) — bot harus keluar cepat, bukan muter-muter
+          // nunggu sampai budget habis
+          id: 1000, type: 1, start_time: 'MOCK 02:00 PM', is_progress: 0, is_join: 0,
+          join_total: 0, join_user_limit: 100, limit_price: 0, level_limit: 0,
+          diff_time_start: (T0 - Date.now()) + 20 * 60 * 1000,
+        },
+      ],
     },
   };
 }
@@ -86,13 +95,14 @@ function run() {
     const deadline = setTimeout(() => p.kill('SIGKILL'), 45000);
     p.stdout.on('data', (d) => { out += d; });
     p.stderr.on('data', (d) => { out += d; });
-    p.on('close', () => { clearTimeout(deadline); resolve(out); });
+    p.on('close', () => { clearTimeout(deadline); resolve({ out, exitAt: Date.now() }); });
   });
 }
 
 server.listen(PORT, '127.0.0.1', async () => {
   log.push(`mock nyala di :${PORT} — T0 dalam 6s`);
-  const out = await run();
+  const run_ = await run();
+  const out = run_.out;
   console.log(out);
 
   const head = out.split('\n').filter((l) => /arm|tembak|📣|nembak|keluar/.test(l));
@@ -116,6 +126,7 @@ server.listen(PORT, '127.0.0.1', async () => {
     ['ringkasan hasil dicetak', /📣 angpao #999/.test(out)],
     ['kode terminal (too slow) dihentikan & dilaporkan', /kalah cepat|sudah ikut/.test(out)],
     ['akun yang menang tercatat ikut', /✅3 ikut/.test(out)],
+    ['event jauh → keluar cepat (bukan nyangkut sampai budget)', /budget tersisa/.test(out) && run_.exitAt - T0 < 8000],
   ];
   console.log('\n=== hasil verifikasi ===');
   let bad = 0;
