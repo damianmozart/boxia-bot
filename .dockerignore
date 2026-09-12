@@ -1,0 +1,29 @@
+# Jangan bawa sampah ke dalam image — Dockerfile memakai `COPY . .`, jadi tanpa
+# file ini log 15 MB, riwayat .git, dan state runtime ikut ke-upload ke registry.
+.git
+.github
+*.log
+*-state.json
+reported-events.json
+daily-schedule-state.json
+.cache/
+node_modules
+
+# Dokumen & tooling lokal (nggak dipakai di runtime container)
+*.md
+Dockerfile*
+fly.toml*
+.dockerignore
+test-arm-fire.mjs
+analyze-participants.mjs
+dispatch-ping.mjs
+deploy-fly.ps1
+deploy-fly.sh
+setup-vps.sh
+run-*.cmd
+run-*.sh
+*.service
+boxkia-bot-migrasi.zip
+
+# CATATAN: config.json SENGAJA tidak di-exclude — bot.mjs membacanya dari disk
+# (/app/config.json) dan image di registry Fly bersifat privat ke organisasimu.

@@ -22,6 +22,12 @@ concurrency:
 
 jobs:
   bot:
+    # Kalau bot event sudah jalan di Fly.io (region sin, RTT ±50-80 ms), job ini
+    # harus dilewati supaya tidak ada DUA bot yang nembak join di event yang sama.
+    # Cara mengaktifkan: GitHub → Settings → Secrets and variables → Actions →
+    # Variables → buat variabel BOXKIA_FLY_ACTIVE = true (skrip deploy-fly yang
+    # mengurus ini otomatis). Hapus variabelnya untuk balik ke Actions.
+    if: ${{ vars.BOXKIA_FLY_ACTIVE != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:

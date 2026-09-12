@@ -1,10 +1,25 @@
 # Konfigurasi Fly.io — watcher SP (boxkia-sp-watch)
-# Region "sin" = Singapore → latensi rendah ke API Jakarta.
+#
+# Opsional: monitoring SP tidak butuh latensi rendah, jadi GitHub Actions
+# (tiap 5 menit) sudah cukup. Deploy ini hanya kalau mau semuanya lepas dari
+# kuota Actions.
 app = "boxkia-sp-watch"
 primary_region = "sin"
 
 [build]
   dockerfile = "Dockerfile.watch"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
+  cpus = 1
+
+[env]
+  TZ = "Asia/Jakarta"
+  DATA_DIR = "/data"
+
+auto_stop_machines = false
+min_machines_running = 1
 
 [mounts]
   source = "boxkia_watch_data"

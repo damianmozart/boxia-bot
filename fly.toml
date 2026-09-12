@@ -1,11 +1,32 @@
 # Konfigurasi Fly.io — bot event (boxkia-bot)
-# Region "sin" = Singapore → latensi rendah ke API Jakarta (±50-80 ms).
-# Tidak ada port publik (bot cuma butuh koneksi keluar).
+#
+# Kenapa Singapore: kuota angpao (100 slot) habis di detik ke-0 (data peserta:
+# 89 orang masuk di detik pertama). Runner GitHub Actions ada di US dengan RTT
+# ±340 ms ke API Jakarta; dari region "sin" RTT-nya ±50-80 ms. Beda 250-300 ms
+# itu yang menentukan menang atau "Too slow, all gone".
+#
+# Bot cuma butuh koneksi keluar, jadi tidak ada port publik & tidak ada
+# [http_service]/[services] — Fly menjalankannya sebagai proses biasa 24/7.
 app = "boxkia-bot"
 primary_region = "sin"
 
 [build]
   dockerfile = "Dockerfile"
+
+# Mesin terkecil yang nyaman: bot ini cuma menunggu timer lalu mengirim beberapa
+# request HTTP. Perkiraan biaya ±$2/bulan (shared-cpu-1x 256MB + volume 1 GB).
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
+  cpus = 1
+
+[env]
+  TZ = "Asia/Jakarta"
+  DATA_DIR = "/data"
+
+# Bot harus bangun 24/7 untuk menangkap event tiap jam — jangan auto-stop.
+auto_stop_machines = false
+min_machines_running = 1
 
 [mounts]
   source = "boxkia_data"
