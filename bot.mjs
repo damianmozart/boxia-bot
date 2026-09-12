@@ -211,6 +211,23 @@ function targetMatch(a) {
   return a.type === Number(CFG.targetType);
 }
 
+/* Kenapa akun ini tidak punya record di event tersebut? Bisa karena memang tidak
+ * memenuhi syarat (level/belanja) sehingga bot tidak pernah menembak — beda dengan
+ * kalah cepat. Dipakai di laporan supaya tidak menyebut "kalah cepat" padahal
+ * akunnya sejak awal tidak eligible. Mengembalikan null kalau kita tidak yakin
+ * (mis. data belanja belum diambil) — lebih baik generik daripada salah. */
+function skipReason(a, acct) {
+  const u = users.get(acct.key);
+  if (!u) return null;
+  if (a.type === 0 && u.user_level < (a.level_limit || 0)) {
+    return `syarat LV${a.level_limit} — akun LV${u.user_level}`;
+  }
+  if (a.type === 1 && spends.has(acct.key) && Number(spends.get(acct.key) || 0) < (a.limit_price || 0)) {
+    return `syarat belanja ${a.limit_price} — akun ${spends.get(acct.key)}`;
+  }
+  return null;
+}
+
 // null = boleh dicoba; string = alasan tidak memenuhi syarat (skip)
 function ineligibleReason(a, spend, user) {
   if (a.type === 0 && user && user.user_level < (a.level_limit || 0)) {
@@ -476,7 +493,12 @@ async function reportResult(a) {
     const u = users.get(acct.key);
     if (!u) return `• ${acct.name} — token mati`;
     const rec = all.find((x) => String(x.user_id) === String(u.user_id));
-    if (!rec) return `• ${acct.name} — ❌ tidak masuk (kalah cepat)`;
+    if (!rec) {
+      const why = skipReason(a, acct);
+      return why
+        ? `• ${acct.name} — ⏭ tidak ikut (${why})`
+        : `• ${acct.name} — ❌ tidak masuk (kalah cepat)`;
+    }
     joined++;
     const pos = Number(rec.sale_num) || 0;
     if (pos) bestPos = Math.min(bestPos, pos);
