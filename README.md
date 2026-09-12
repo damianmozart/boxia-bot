@@ -40,10 +40,13 @@ Token itu rahasia (sama seperti password) — jangan share ke siapa pun.
 ### 2. Jalankan
 
 ```bash
-node bot.mjs --check    # cek token + lihat jadwal hari ini, lalu keluar
-node bot.mjs --saldo    # tampilkan saldo & poin tiap akun, lalu keluar
-node bot.mjs --sp       # scan barang SP: "roll tanpa SP" vs "avg rolls" (due checker), lalu keluar
-node bot.mjs            # jalan terus — biarkan terminal ini terbuka
+node bot.mjs --check      # cek token + lihat jadwal hari ini, lalu keluar
+node bot.mjs --saldo      # tampilkan saldo & poin tiap akun, lalu keluar
+node bot.mjs --sp         # scan barang SP: "roll tanpa SP" vs "avg rolls" (due checker), lalu keluar
+node bot.mjs --hasil      # kirim laporan hasil undian event terakhir (posisi + dapat berapa)
+node bot.mjs --hasil 244  # laporan event tertentu (id dari kolom jadwal)
+node bot.mjs --notif-test # kirim 1 notif tes ke HP, buat memastikan jalur notif sehat
+node bot.mjs              # jalan terus — biarkan terminal ini terbuka
 ```
 
 Atau double-click `run-boxkia.cmd`.
@@ -95,7 +98,8 @@ Hapus: `Unregister-ScheduledTask -TaskName 'BoxkiaSpWatch' -Confirm:$false`
 | `postFireCooldownMs` | Jeda santai setelah selesai nembak (default 1500 ms) — biar request jadwal berikutnya tidak ikut rebutan di detik kritis. Otomatis dipangkas kalau ada event lain yang sudah di-arm |
 | `actionsBudgetMs` | Mode `--actions`: lama satu run bertahan (default 600000 = 10 menit). **Wajib > jeda tick cron** supaya tiap event pasti ketangkep |
 | `apiTimeoutMs` | Timeout tiap request API (default 15000 ms) — mencegah fetch yang macet membekukan bot |
-| `ntfyTopic` | Topic ntfy.sh (opsional) untuk notifikasi ke HP saat berhasil/gagal, plus laporan hasil undian (`📊 Hasil …`) setelah event selesai dan laporan saldo (`💰 Saldo …`) saat bot start & tiap heartbeat |
+| `ntfyTopic` | Topic ntfy.sh (opsional) untuk notifikasi ke HP saat berhasil/gagal, plus laporan hasil undian setelah event selesai (`🏆 … MENANG Rp …` atau `📊 … belum ada yang menang`) berisi posisi tiap akun, jam join relatif ke waktu mulai (`T+0s`), dan berapa yang didapat masing-masing — dan laporan saldo (`💰 Saldo …`) saat bot start & tiap heartbeat |
+| `waitResultMs` | Setelah nembak, bot menunggu hasil undian muncul lalu mengirim laporan posisi + berapa yang didapat (default 180000 = 3 menit). Laporan dikirim **menang maupun tidak** — bisa dipicu manual dengan `node bot.mjs --hasil` |
 | `spCheckHours` | **Scanner SP otomatis** — kalau > 0 (mis. `1`), bot mengecek tiap X jam apakah ada barang yang SP-nya "jatuh tempo" (roll tanpa SP sudah melewati rata-rata) dan kirim notif `🔥` ke ntfy. Default `0` = mati |
 | `dailyScheduleHour` | Jam (0–23) kirim **ringkasan jadwal hari ini** (`📅`) ke ntfy — daftar event + akun mana yang memenuhi syarat (elig). Default `0` = tengah malam. Bisa kirim manual kapan saja dengan `node bot.mjs --jadwal` |
 

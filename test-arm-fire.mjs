@@ -52,6 +52,7 @@ function schedule() {
 }
 
 const bucketByToken = new Map();
+const userByToken = new Map();
 function joinResult(token, id) {
   if (Date.now() < T0) return { code: 1, msg: 'not started yet' };
   if (id === 1001) return { code: 0, msg: 'ok', data: {} }; // free box: selalu sukses
@@ -83,14 +84,28 @@ const server = http.createServer((req, res) => {
       return res.writeHead(200, JSON_H).end(JSON.stringify(joinResult(tok, id)));
     }
     if (url.includes('/activity/luckyBag/record')) {
-      return res.writeHead(200, JSON_H).end(JSON.stringify({ code: 0, data: { list: [] } }));
+      // Daftar peserta palsu: tiap akun dapat posisi + status menang + amount,
+      // supaya laporan hasil undian bisa ikut diverifikasi.
+      const list = [...userByToken.entries()].map(([, uid], i) => ({
+        id: 5000 + i,
+        user_id: uid,
+        is_win: i % 3 === 0 ? 1 : 0,
+        join_date: '01:00:02 PM',
+        sale_num: (i * 7) % 60 + 1,
+        amount: i % 3 === 0 ? '350000.00' : '0.00',
+        user_nickname: `mock${i}`,
+      }));
+      return res.writeHead(200, JSON_H).end(JSON.stringify({ code: 0, data: { list, count: list.length } }));
     }
     if (url.includes('/user/info')) {
-      if (!bucketByToken.has(tok)) bucketByToken.set(tok, bucketByToken.size % 3);
+      if (!bucketByToken.has(tok)) {
+        bucketByToken.set(tok, bucketByToken.size % 3);
+        userByToken.set(tok, 1000 + userByToken.size);
+      }
       const i = [...bucketByToken.keys()].indexOf(tok);
       return res.writeHead(200, JSON_H).end(JSON.stringify({
         code: 0, msg: 'ok',
-        data: { nickname: `mock${i}`, user_id: 1000 + i, user_level: 9, balance: '1000', integral: '5' },
+        data: { nickname: `mock${i}`, user_id: userByToken.get(tok), user_level: 9, balance: '1000', integral: '5' },
       }));
     }
     res.writeHead(404, JSON_H).end(JSON.stringify({ code: 404, msg: 'no route' }));
@@ -153,6 +168,9 @@ server.listen(PORT, '127.0.0.1', async () => {
     ['angpao tetap tepat waktu (≤600ms setelah mulai)', angpaoT0 != null && angpaoT0 - T0 <= 600],
     ['free box lebih lambat dari angpao', freeT0 != null && angpaoT0 != null && freeT0 > angpaoT0],
     ['event jauh → keluar cepat (bukan nyangkut sampai budget)', /budget tersisa/.test(out) && run_.exitAt - T0 < 8000],
+    ['laporan hasil undian terkirim dengan POSISI tiap akun', /posisi \d+\/\d+/.test(out)],
+    ['laporan menyebut berapa yang DIDAPAT', /DAPAT Rp |dapat Rp 0/.test(out)],
+    ['laporan menghitung total kemenangan', /Total didapat|Posisi terbaik/.test(out)],
   ];
   console.log('\n=== hasil verifikasi ===');
   let bad = 0;

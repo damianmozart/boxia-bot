@@ -24,6 +24,7 @@
  *   node bot.mjs --sp         — scan barang SP & cek "roll tanpa SP" vs "avg rolls" (due checker)
  *   node bot.mjs --jadwal     — kirim ringkasan jadwal hari ini + akun yang bisa ikut ke ntfy
  *   node bot.mjs --notif-test — kirim 1 notifikasi tes ke ntfy, lalu keluar
+ *   node bot.mjs --hasil [id]  — kirim laporan hasil undian (posisi + dapat berapa) ke ntfy
  *   node bot.mjs --actions    — mode GitHub Actions (single-shot): selama budget
  *                                (actionsBudgetMs) bot menunggu presisi lalu join,
  *                                habis itu keluar — tick berikutnya lanjut lagi
@@ -56,6 +57,7 @@ const CFG = {
   freeBoxDelayJitterMs: 300,   // tambahan acak 0..X ms, biar posisinya bervariasi
   postFireCooldownMs: 1500,    // jeda santai setelah nembak, biar nggak rebutan request list
   actionsBudgetMs: 600000,     // mode Actions: berapa lama satu run boleh bertahan (ms)
+  waitResultMs: 180000,        // seberapa lama menunggu hasil undian muncul setelah nembak (ms)
   apiTimeoutMs: 15000,         // timeout tiap request API — cegah fetch macet membekukan bot
   ntfyTopic: '',
   ...JSON.parse(readFileSync(path.join(__dirname, 'config.json'), 'utf8')),
@@ -169,6 +171,15 @@ async function api(p, { account, method = 'GET', params, data, timeoutMs } = {})
 // latensi laptop lokal (±30ms). Kalau lead-nya nggak nyesuaikan RTT, request
 // pertama selalu datang telat dan kita kalah balapan.
 let LAST_RTT_MS = 0;
+
+// Akun mana pun yang tokennya valid — buat request yang cuma butuh login dan
+// bukan milik akun tertentu (mis. daftar peserta/record). Dulu tempat ini
+// memakai token level-atas (CFG.token) yang nggak ada lagi sejak config pindah
+// ke multi-akun, jadi hasilnya selalu "login required" dan laporan hasil undian
+// selalu kosong.
+function anyAccount() {
+  return ACCOUNTS.find((a) => users.get(a.key)) || ACCOUNTS[0] || CFG;
+}
 
 function targetMatch(a) {
   if (CFG.targetType === 'all') return true;
@@ -343,43 +354,106 @@ async function fireBurst(a, accts) {
 
 /* ---------------- laporan hasil undian ---------------- */
 
-async function reportResult(a) {
-  // kumpulkan record dari hari ini (0) dan kemarin (1), dedup by id
+const rupiah = (v) => Number(v || 0).toLocaleString('id-ID', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+// Detik ke berapa join-nya tercatat, dihitung dari jam mulai event. Berguna buat
+// cek apakah timing tembakan kita sudah benar (angpao: 89/100 slot habis di detik 0).
+function secAfterStart(a, joinDate) {
+  const parse = (s) => {
+    const m = String(s || '').match(/(\d+):(\d+)(?::(\d+))?\s*(AM|PM)?/i);
+    if (!m) return null;
+    let h = Number(m[1]);
+    const mer = (m[4] || '').toUpperCase();
+    if (mer) { h %= 12; if (mer === 'PM') h += 12; }
+    return h * 3600 + Number(m[2]) * 60 + Number(m[3] || 0);
+  };
+  const s = parse(joinDate);
+  const t0 = parse(a.start_time);
+  return s == null || t0 == null ? null : s - t0;
+}
+
+// Daftar peserta + status menang + amount. Coba hari ini (0) dulu, baru kemarin (1).
+async function fetchRecords(id) {
+  const acct = anyAccount();
   const all = [];
   const seen = new Set();
   for (const dt of [0, 1]) {
-    let page = 1;
-    while (page <= 10) {
-      const r = await api('/activity/luckyBag/record', { params: { page, page_size: 50, id: a.id, date_type: dt } }).catch(() => null);
+    for (let page = 1; page <= 10; page++) {
+      const r = await api('/activity/luckyBag/record', { account: acct, params: { page, page_size: 50, id, date_type: dt } }).catch(() => null);
       if (!r || r.code !== 0 || !r.data) break;
       const list = r.data.list || [];
-      for (const rec of list) {
-        if (!seen.has(rec.id)) { seen.add(rec.id); all.push(rec); }
-      }
+      for (const rec of list) if (!seen.has(rec.id)) { seen.add(rec.id); all.push(rec); }
       if (list.length < 50) break;
-      page++;
     }
     if (all.length) break;
   }
+  return all;
+}
+
+/* Laporan hasil undian: posisi TIAP akun + berapa yang didapat, menang atau tidak.
+ * Record punya `sale_num` (posisi masuk) dan `amount` (yang didapat; 0 kalau zonk),
+ * jadi notifikasi ini sekaligus jadi umpan balik apakah timing tembakan kita efektif. */
+async function reportResult(a) {
+  const all = await fetchRecords(a.id);
   if (!all.length) return false; // record belum terisi — coba lagi nanti
   reported.add(a.id);
   try { saveReported(reported); } catch { /* abaikan */ }
 
-  const rupiah = (v) => Number(v || 0).toLocaleString('id-ID', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  const lines = ACCOUNTS.map((acct) => {
+  const total = all.length;
+  let wonTotal = 0, wonCount = 0, joined = 0, bestPos = Infinity;
+  const rows = ACCOUNTS.map((acct) => {
     const u = users.get(acct.key);
-    if (!u) return null;
-    const rec = all.find((x) => x.user_id == u.user_id);
-    if (!rec) return `• ${acct.name}: tidak ikut`;
-    const win = rec.is_win == 1 ? ' 🏆' : '';
-    const amount = rec.amount ? ` — Rp ${rupiah(rec.amount)}` : '';
-    return `• ${acct.name}: IKUT — #${rec.sale_num}${amount}${win}`;
-  }).filter(Boolean);
+    if (!u) return `• ${acct.name} — token mati`;
+    const rec = all.find((x) => String(x.user_id) === String(u.user_id));
+    if (!rec) return `• ${acct.name} — ❌ tidak masuk (kalah cepat)`;
+    joined++;
+    const pos = Number(rec.sale_num) || 0;
+    if (pos) bestPos = Math.min(bestPos, pos);
+    const dt = secAfterStart(a, rec.join_date);
+    const at = dt == null ? '' : ` · T+${dt}s`;
+    const amt = Number(rec.amount || 0);
+    if (rec.is_win == 1) {
+      wonCount++;
+      wonTotal += amt;
+      return `• ${acct.name} — posisi ${pos}/${total}${at} · 🏆 DAPAT Rp ${rupiah(amt)}`;
+    }
+    return `• ${acct.name} — posisi ${pos}/${total}${at} · dapat Rp 0`;
+  });
 
-  const msg = `📊 Hasil ${TYPE_NAME[a.type]} #${a.id} (${a.start_time}) — ${all.length} peserta\n${lines.join('\n')}`;
+  const label = TYPE_NAME[a.type] || `type${a.type}`;
+  const title = wonCount
+    ? `🏆 ${label}: ${wonCount} akun MENANG Rp ${rupiah(wonTotal)}`
+    : `📊 ${label}: belum ada yang menang`;
+  const head = `${label} #${a.id} · ${a.start_time} · ${total} peserta · ${joined}/${ACCOUNTS.length} akun masuk`;
+  const tail = wonCount
+    ? `\n💰 Total didapat: Rp ${rupiah(wonTotal)}`
+    : (Number.isFinite(bestPos) ? `\nPosisi terbaik kita: #${bestPos}/${total}` : '');
+  const msg = `${head}\n${rows.join('\n')}${tail}`;
   log(msg);
-  await ntfy('Boxkia: hasil undian', msg);
+  await ntfy(title, msg);
   return true;
+}
+
+/* Dipanggil tepat sesudah burst: tunggu sampai hasil undian keluar, lalu lapor.
+ * Undian angpao selesai begitu kuota penuh (±2 detik), tapi daftar record kadang
+ * baru terisi beberapa detik setelahnya — jadi dicoba berkala selama waitResultMs. */
+async function collectResults(budgetEnd = Infinity) {
+  const waitUntil = Math.min(budgetEnd, Date.now() + (Number(CFG.waitResultMs) || 180000));
+  for (;;) {
+    let list = null;
+    try { list = (await loadSchedule(ACCOUNTS[0])).list || []; } catch { /* coba lagi */ }
+    let pending = !list;
+    if (list) {
+      for (const a of list) {
+        if (!attemptedAny.has(a.id) || reported.has(a.id)) continue;
+        if (!(await reportResult(a))) pending = true;
+      }
+    }
+    if (!pending) return;
+    if (Date.now() + 15000 > waitUntil) return;   // batas tunggu habis
+    if (msUntilNextFire() < 15000) return;        // ada event lain yang mau ditembak
+    await sleep(15000);
+  }
 }
 
 /* ---------------- laporan saldo ---------------- */
@@ -646,9 +720,12 @@ async function loopOnce(forceOverview = false) {
   }
 
   // lapor hasil undian untuk event yang sudah selesai & pernah dicoba.
-  // Ditunda kalau ada event yang lagi di-arm / baru ditembak — request laporan
-  // nggak boleh nyolong waktu kritis.
-  if (scheduleList && !armed.size && !targets.size) {
+  // Ditunda HANYA kalau ada event yang lagi di-arm / sebentar lagi ditembak —
+  // request laporan nggak boleh nyolong waktu kritis. (Dulu syaratnya
+  // `!targets.size`, jadi laporan ke-skip terus selama masih ada event lain
+  // yang eligible di hari itu.)
+  const criticalWindow = armed.size > 0 || soonestStartsIn <= CFG.armWindowMs;
+  if (scheduleList && !criticalWindow) {
     for (const a of scheduleList) {
       if (attemptedAny.has(a.id) && a.is_progress === 2 && !reported.has(a.id) && Date.now() >= (reportRetry.get(a.id) ?? 0)) {
         const ok = await reportResult(a);
@@ -713,6 +790,9 @@ async function actionsMode() {
         const cd = Number(CFG.postFireCooldownMs) || 1500;
         const wait = Math.min(cd, msUntilNextFire());
         if (wait > 0) await sleep(wait);
+        // tunggu undiannya kelar lalu kirim laporan posisi + dapat berapa.
+        // Batas waktunya budget sesi, jadi nggak akan nyangkut sebelum keluar.
+        await collectResults(budgetEnd);
       }
       continue;
     }
@@ -772,6 +852,19 @@ async function main() {
   if (args.has('--sp')) { await scanSpDue(); return; }
   if (args.has('--jadwal')) { await reportDailySchedule(); return; }
   if (args.has('--actions')) { await actionsMode(); return; }
+  if (args.has('--hasil')) {
+    const wantId = Number([...args].find((x) => /^\d+$/.test(x))) || null;
+    let list = [];
+    try { list = (await loadSchedule(ACCOUNTS[0])).list || []; } catch { /* abaikan */ }
+    const ev = wantId
+      ? (list.find((x) => x.id === wantId) || { id: wantId, type: 1, start_time: '--' })
+      : list.filter((x) => x.is_progress === 2).sort((a, b) => b.diff_time_start - a.diff_time_start)[0];
+    if (!ev) { log('⚠ Tidak ada event yang selesai hari ini. Pakai: node bot.mjs --hasil <id>'); return; }
+    const ok = await reportResult(ev);
+    if (!ok) log(`⚠ Record #${ev.id} masih kosong (undian belum kelar / nggak ada peserta).`);
+    return;
+  }
+
   if (args.has('--check') || args.has('--once')) {
     await loopOnce(true);
     if (armed.size) { await sleepUntil(nextFireAt() - 2); await fireArmed(); }
