@@ -961,7 +961,14 @@ async function main() {
   for (const k of loadAttemptedKeys()) attemptedPrev.add(k);
 
   for (const acct of ACCOUNTS) {
-    const u = await fetchUserInfo(acct).catch(() => null);
+    // Retry: sekali gagal jaringan jangan langsung divonis "token mati" — akun itu
+    // akan dilewati di SEMUA event sepanjang sesi (10 menit di Actions). Server
+    // juga kadang balas 10003 sesaat waktu kena rate-limit.
+    let u = null;
+    for (let attempt = 1; attempt <= 3 && !u; attempt++) {
+      u = await fetchUserInfo(acct).catch(() => null);
+      if (!u && attempt < 3) await sleep(1500);
+    }
     users.set(acct.key, u);
     attempted.set(acct.key, new Set());
     joined.set(acct.key, new Set());
