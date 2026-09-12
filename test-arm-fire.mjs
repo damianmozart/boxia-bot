@@ -12,9 +12,11 @@ import { spawn } from 'node:child_process';
 
 const PORT = 8099;
 const T0 = Date.now() + 6000;
+const FREEBOX_DELAY_MS = 2500;
 const log = [];
 let listCalls = [];
 const joinFirstAt = new Map();
+const joinByEvent = new Map(); // eventId -> { first, tokens:Set }
 
 const JSON_H = { 'Content-Type': 'application/json' };
 
@@ -31,6 +33,13 @@ function schedule() {
           diff_time_start: Math.max(0, T0 - Date.now()),
         },
         {
+          // free box (type 0) mulai barengan: HARUS ditembak beberapa detik
+          // SETELAH mulai (delay), bukan pas dibuka
+          id: 1001, type: 0, start_time: 'MOCK 01:00 PM', is_progress: 0, is_join: 0,
+          join_total: 0, join_user_limit: 70, limit_price: 0, level_limit: 0,
+          diff_time_start: Math.max(0, T0 - Date.now()),
+        },
+        {
           // event jauh (20 menit lagi) — bot harus keluar cepat, bukan muter-muter
           // nunggu sampai budget habis
           id: 1000, type: 1, start_time: 'MOCK 02:00 PM', is_progress: 0, is_join: 0,
@@ -43,8 +52,9 @@ function schedule() {
 }
 
 const bucketByToken = new Map();
-function joinResult(token) {
+function joinResult(token, id) {
   if (Date.now() < T0) return { code: 1, msg: 'not started yet' };
+  if (id === 1001) return { code: 0, msg: 'ok', data: {} }; // free box: selalu sukses
   const bucket = bucketByToken.get(token) ?? 2;
   if (bucket === 0) return { code: 1, msg: 'Duplicate participation not allowed' };
   if (bucket === 1) return { code: 1, msg: 'Too slow, all gone' };
@@ -62,8 +72,15 @@ const server = http.createServer((req, res) => {
       return res.writeHead(200, JSON_H).end(JSON.stringify(schedule()));
     }
     if (url.includes('/activity/luckyBag/join')) {
-      if (!joinFirstAt.has(tok)) joinFirstAt.set(tok, Date.now());
-      return res.writeHead(200, JSON_H).end(JSON.stringify(joinResult(tok)));
+      const now = Date.now();
+      if (!joinFirstAt.has(tok)) joinFirstAt.set(tok, now);
+      let id = null;
+      try { id = JSON.parse(body || '{}').id; } catch { /* biarkan null */ }
+      if (id != null) {
+        if (!joinByEvent.has(id)) joinByEvent.set(id, { first: now, tokens: new Set() });
+        joinByEvent.get(id).tokens.add(tok);
+      }
+      return res.writeHead(200, JSON_H).end(JSON.stringify(joinResult(tok, id)));
     }
     if (url.includes('/activity/luckyBag/record')) {
       return res.writeHead(200, JSON_H).end(JSON.stringify({ code: 0, data: { list: [] } }));
@@ -89,6 +106,8 @@ function run() {
         BOXKIA_API_BASE: `http://127.0.0.1:${PORT}`,
         BOXKIA_NTFY_TOPIC: '',
         ACTIONS_BUDGET_MS: '60000',
+        BOXKIA_FREEBOX_DELAY_MS: String(FREEBOX_DELAY_MS),
+        BOXKIA_FREEBOX_JITTER_MS: '0',
       },
     });
     let out = '';
@@ -111,6 +130,8 @@ server.listen(PORT, '127.0.0.1', async () => {
 
   const fired = [...joinFirstAt.values()];
   const firstJoin = fired.length ? Math.min(...fired) : null;
+  const angpaoT0 = joinByEvent.get(999)?.first ?? null;
+  const freeT0 = joinByEvent.get(1001)?.first ?? null;
   // jendela kritis = sebelum & saat tembakan (setelah burst, request list lagi itu wajar)
   const critStart = T0 - 1000, critEnd = T0 + 150;
   const listInCritical = listCalls.filter((t) => t >= critStart && t <= critEnd).length;
@@ -126,6 +147,11 @@ server.listen(PORT, '127.0.0.1', async () => {
     ['ringkasan hasil dicetak', /📣 angpao #999/.test(out)],
     ['kode terminal (too slow) dihentikan & dilaporkan', /kalah cepat|sudah ikut/.test(out)],
     ['akun yang menang tercatat ikut', /✅3 ikut/.test(out)],
+    ['free box di-arm pakai delay (bukan lead)', /🛡 arm free-box #1001 — tembak dalam \d+ms .*delay \d+ms/.test(out)],
+    ['free box ditembak SETELAH mulai (>1.8s)', freeT0 != null && freeT0 - T0 > 1800],
+    ['free box tidak lebih awal dari delay yang diminta', freeT0 != null && freeT0 - T0 >= FREEBOX_DELAY_MS - 300],
+    ['angpao tetap tepat waktu (≤600ms setelah mulai)', angpaoT0 != null && angpaoT0 - T0 <= 600],
+    ['free box lebih lambat dari angpao', freeT0 != null && angpaoT0 != null && freeT0 > angpaoT0],
     ['event jauh → keluar cepat (bukan nyangkut sampai budget)', /budget tersisa/.test(out) && run_.exitAt - T0 < 8000],
   ];
   console.log('\n=== hasil verifikasi ===');
@@ -134,7 +160,9 @@ server.listen(PORT, '127.0.0.1', async () => {
   console.log(`\nlist calls total: ${listCalls.length} (sebelum jendela kritis: ${lastListBefore}, di dalam: ${listInCritical})`);
   console.log(`offset list calls vs T0: ${listCalls.map((t) => t - T0).join(', ')}`);
   console.log(`offset join pertama vs T0: ${[...joinFirstAt.entries()].map(([k, v]) => `${k.slice(0, 6)}=${v - T0}`).join(', ')}`);
-  console.log(`T0-relative join pertama: ${firstJoin == null ? 'n/a' : (firstJoin - T0) + 'ms'}`);
+  console.log(`T0-relative join pertama (semua): ${firstJoin == null ? 'n/a' : (firstJoin - T0) + 'ms'}`);
+  console.log(`angpao #999 join pertama: ${angpaoT0 == null ? 'n/a' : (angpaoT0 - T0) + 'ms'} (${joinByEvent.get(999)?.tokens.size ?? 0} akun)`);
+  console.log(`free-box #1001 join pertama: ${freeT0 == null ? 'n/a' : (freeT0 - T0) + 'ms'} (${joinByEvent.get(1001)?.tokens.size ?? 0} akun), delay diminta ${FREEBOX_DELAY_MS}ms`);
   console.log(bad ? `\n❌ ${bad} check gagal` : '\n✅ SEMUA CHECK LULUS');
   server.close();
   process.exit(bad ? 1 : 0);

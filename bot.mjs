@@ -48,6 +48,8 @@ const CFG = {
   joinConcurrency: 2,          // jumlah request join PARALEL per akun (spray) — 1 = sequential
   joinTimeoutMs: 3000,         // timeout tiap request join (harus < retryMaxMs)
   armWindowMs: 20000,          // X ms sebelum mulai: berhenti polling jadwal, tidur presisi
+  freeBoxDelayMs: 2000,        // free-box (type 0): join X ms SETELAH mulai — biar masuk posisi ~20-30an, bukan ke-1
+  freeBoxDelayJitterMs: 1000,  // tambahan acak 0..X ms, biar posisinya nggak selalu persis sama
   postFireCooldownMs: 1500,    // jeda santai setelah nembak, biar nggak rebutan request list
   actionsBudgetMs: 600000,     // mode Actions: berapa lama satu run boleh bertahan (ms)
   apiTimeoutMs: 15000,         // timeout tiap request API — cegah fetch macet membekukan bot
@@ -60,6 +62,8 @@ for (const [key, env] of Object.entries({
   armWindowMs: 'BOXKIA_ARM_WINDOW_MS',
   retryMaxMs: 'BOXKIA_RETRY_MAX_MS',
   maxEarlyFireMs: 'BOXKIA_MAX_EARLY_FIRE_MS',
+  freeBoxDelayMs: 'BOXKIA_FREEBOX_DELAY_MS',
+  freeBoxDelayJitterMs: 'BOXKIA_FREEBOX_JITTER_MS',
   pollIntervalMs: 'BOXKIA_POLL_MS',
   joinConcurrency: 'BOXKIA_JOIN_CONCURRENCY',
 })) {
@@ -513,6 +517,15 @@ function effectiveLead() {
   return Math.round(Math.min(max, Math.max(min, (LAST_RTT_MS || 0) * 0.6)));
 }
 
+/* Free box (type 0) sengaja TIDAK direbutkan posisi pertama — diminta masuk di
+ * posisi 20-an/30-an, jadi tembakannya digeser `freeBoxDelayMs` ms SETELAH event
+ * dibuka (plus jitter acak). Angpao (type 1) tetap tembak presisi saat dibuka. */
+function freeBoxDelay() {
+  const base = Math.max(0, Number(CFG.freeBoxDelayMs) || 0);
+  const jitter = Math.max(0, Number(CFG.freeBoxDelayJitterMs) || 0);
+  return base + (jitter ? Math.random() * jitter : 0);
+}
+
 function nextFireAt() {
   let m = Infinity;
   for (const e of armed.values()) if (e.fireAt < m) m = e.fireAt;
@@ -525,6 +538,11 @@ async function sleepUntil(t) {
     if (d <= 0) return;
     await sleep(d > 80 ? d - 25 : d);
   }
+}
+
+function msUntilNextFire() {
+  const nf = nextFireAt();
+  return Number.isFinite(nf) ? Math.max(0, nf - Date.now()) : Infinity;
 }
 
 async function fireArmed() {
@@ -586,11 +604,18 @@ async function loopOnce(forceOverview = false) {
   for (const { a, accts } of targets.values()) {
     const startsIn = (a.diff_time_start ?? 0) - (now - fetchTime);
     if (startsIn < soonestStartsIn) soonestStartsIn = startsIn;
-    if (a.is_progress === 1 || startsIn <= lead) {
+    if (a.is_progress === 1) { fireNow.push(fireBurst(a, accts)); continue; }
+
+    // angpao: negatif = tembak SEBELUM mulai (lead). free box: positif = tembak
+    // SESUDAH mulai (delay), biar posisinya di belakang dikit, bukan juara 1.
+    const offset = a.type === 0 ? freeBoxDelay() : -lead;
+    const target = startsIn + offset;
+    if (target <= 0) {
       fireNow.push(fireBurst(a, accts));
     } else if (startsIn <= CFG.armWindowMs) {
-      armed.set(a.id, { a, accts, fireAt: now + startsIn - lead });
-      log(`🛡 arm ${TYPE_NAME[a.type]} #${a.id} — tembak dalam ${Math.round(startsIn - lead)}ms (${accts.length} akun, lead ${lead}ms)`);
+      armed.set(a.id, { a, accts, fireAt: now + target });
+      const mode = offset >= 0 ? `delay ${Math.round(offset)}ms` : `lead ${-Math.round(offset)}ms`;
+      log(`🛡 arm ${TYPE_NAME[a.type]} #${a.id} — tembak dalam ${Math.round(target)}ms (${accts.length} akun, ${mode})`);
     }
   }
 
@@ -656,7 +681,13 @@ async function actionsMode() {
       if (nf >= budgetEnd) { log('⏳ tembakan berikutnya di luar budget sesi ini — keluar'); break; }
       log(`💤 tidur presisi ${((nf - Date.now()) / 1000).toFixed(1)}s sampai waktu tembak...`);
       await sleepUntil(nf - 2);
-      if (await fireArmed()) await sleep(Number(CFG.postFireCooldownMs) || 1500);
+      if (await fireArmed()) {
+        // cooldown, tapi jangan sampai menunda event berikutnya yang sudah di-arm
+        // (mis. angpao lalu free-box yang delay-nya cuma 2-3 detik)
+        const cd = Number(CFG.postFireCooldownMs) || 1500;
+        const wait = Math.min(cd, msUntilNextFire());
+        if (wait > 0) await sleep(wait);
+      }
       continue;
     }
 
@@ -726,7 +757,10 @@ async function main() {
       const nf = nextFireAt();
       if (Number.isFinite(nf)) {
         await sleepUntil(nf - 2);
-        if (await fireArmed()) await sleep(Number(CFG.postFireCooldownMs) || 1500);
+        if (await fireArmed()) {
+          const wait = Math.min(Number(CFG.postFireCooldownMs) || 1500, msUntilNextFire());
+          if (wait > 0) await sleep(wait);
+        }
         continue;
       }
 

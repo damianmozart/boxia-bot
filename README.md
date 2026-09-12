@@ -90,7 +90,9 @@ Hapus: `Unregister-ScheduledTask -TaskName 'BoxkiaSpWatch' -Confirm:$false`
 | `joinTimeoutMs` | Timeout tiap request join (default 3000 ms) — harus < `retryMaxMs` supaya satu request macet tidak menelan seluruh burst |
 | `retryIntervalMs` | Jeda antar putaran tembakan di dalam burst (default 120 ms) |
 | `retryMaxMs` | Lama maksimal burst (default 8000 ms) |
-| `postFireCooldownMs` | Jeda santai setelah selesai nembak (default 1500 ms) — biar request jadwal berikutnya tidak ikut rebutan di detik kritis |
+| `freeBoxDelayMs` | **Free box (type 0) saja**: join X ms *setelah* event dibuka (default 2000). Tujuannya supaya masuk di posisi ~20-an/30-an, bukan juara 1 — free box tidak diperebutkan. Set `0` kalau mau ikut ngebut juga |
+| `freeBoxDelayJitterMs` | Tambahan acak 0..X ms untuk free box (default 1000), biar posisinya tidak selalu persis sama |
+| `postFireCooldownMs` | Jeda santai setelah selesai nembak (default 1500 ms) — biar request jadwal berikutnya tidak ikut rebutan di detik kritis. Otomatis dipangkas kalau ada event lain yang sudah di-arm |
 | `actionsBudgetMs` | Mode `--actions`: lama satu run bertahan (default 600000 = 10 menit). **Wajib > jeda tick cron** supaya tiap event pasti ketangkep |
 | `apiTimeoutMs` | Timeout tiap request API (default 15000 ms) — mencegah fetch yang macet membekukan bot |
 | `ntfyTopic` | Topic ntfy.sh (opsional) untuk notifikasi ke HP saat berhasil/gagal, plus laporan hasil undian (`📊 Hasil …`) setelah event selesai dan laporan saldo (`💰 Saldo …`) saat bot start & tiap heartbeat |
@@ -100,6 +102,11 @@ Hapus: `Unregister-ScheduledTask -TaskName 'BoxkiaSpWatch' -Confirm:$false`
 Kalau sudah sering "kehabisan", naikkan `joinConcurrency` ke `3` dan kecilkan
 `retryIntervalMs` ke `80`. Jangan terlalu agresif — kalau ketahuan membanjiri
 server, akun bisa kena batasan.
+
+> **Angpao vs free box.** Angpao (type 1) rebutan kuota 100 orang, jadi ditembak
+> presisi saat event dibuka. Free box (type 0) nggak perlu jadi yang pertama —
+> default-nya digeser `freeBoxDelayMs` (+ jitter) setelah mulai, jadi kamu masuk
+> di urutan 20-an/30-an.
 
 > **Kapan bot berhenti nembak?** Begitu dapat vonis dari server: `code 0` (ikut),
 > `duplicate` (sudah ikut), `too slow / all gone` (kuota habis), `not eligible`,
