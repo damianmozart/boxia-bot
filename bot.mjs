@@ -141,7 +141,12 @@ const spends = new Map();    // key -> user_spend_amount hari ini
 const attempted = new Map(); // key -> Set(eventId)
 const joined = new Map();    // key -> Set(eventId)
 const attemptedAny = new Set(); // event id yang pernah ditembak/diikuti (lintas akun)
-const reported = new Set();     // event id yang hasil undiannya sudah dilaporkan
+const reported = new Set();     // kunci event (id@tanggal) yang hasil undiannya sudah dilaporkan
+// Event yang ditembak di RUN SEBELUMNYA, dalam bentuk kunci `id@tanggal`. Bot mode
+// Actions itu proses baru tiap tick, jadi tanpa ini hasil undian yang belum final
+// saat run berakhir (mis. pemenang free-box baru ditentukan 30 menit kemudian)
+// tidak akan pernah dilaporkan.
+const attemptedPrev = new Set();
 
 /* ---------------- util ---------------- */
 
@@ -340,6 +345,8 @@ async function fireBurst(a, accts) {
   if (!pending.length) return;
   for (const acct of pending) attempted.get(acct.key).add(a.id);
   attemptedAny.add(a.id);
+  attemptedPrev.add(reportKey(a));
+  try { saveAttemptedKeys(attemptedPrev); } catch { /* abaikan */ }
 
   const name = TYPE_NAME[a.type] || `type${a.type}`;
   if (DRY) {
@@ -516,7 +523,7 @@ async function collectResults(budgetEnd = Infinity) {
     let pending = !list;
     if (list) {
       for (const a of list) {
-        if (!attemptedAny.has(a.id) || reported.has(reportKey(a))) continue;
+        if (!wasAttempted(a) || reported.has(reportKey(a))) continue;
         if (!(await reportResult(a))) pending = true;
       }
     }
@@ -563,6 +570,25 @@ function loadReported() {
 }
 function saveReported(s) {
   try { mkdirSync(path.dirname(REPORTED_FILE), { recursive: true }); writeFileSync(REPORTED_FILE, JSON.stringify([...s])); } catch { /* abaikan */ }
+}
+
+const ATTEMPTED_FILE = path.join(DATA_DIR, 'attempted-events.json');
+function loadAttemptedKeys() {
+  try { return new Set(JSON.parse(readFileSync(ATTEMPTED_FILE, 'utf8'))); } catch { return new Set(); }
+}
+function saveAttemptedKeys(s) {
+  // buang yang lebih tua dari kemarin — kuncinya `id@dd/mm/yyyy`
+  const cutoff = dayStart(Date.now()) - 86400000;
+  for (const k of [...s]) {
+    const [d, m, y] = String(k).split('@')[1]?.split('/').map(Number) || [];
+    if (!d || !m || !y || new Date(y, m - 1, d).getTime() < cutoff) s.delete(k);
+  }
+  try { mkdirSync(path.dirname(ATTEMPTED_FILE), { recursive: true }); writeFileSync(ATTEMPTED_FILE, JSON.stringify([...s])); } catch { /* abaikan */ }
+}
+
+// true = event ini pernah kita tembak (sekarang atau di run sebelumnya)
+function wasAttempted(a) {
+  return attemptedAny.has(a.id) || attemptedPrev.has(reportKey(a));
 }
 
 async function reportDailySchedule() {
@@ -798,7 +824,7 @@ async function loopOnce(forceOverview = false) {
   const criticalWindow = armed.size > 0 || soonestStartsIn <= CFG.armWindowMs;
   if (scheduleList && !criticalWindow) {
     for (const a of scheduleList) {
-      if (attemptedAny.has(a.id) && a.is_progress === 2 && !reported.has(reportKey(a)) && Date.now() >= (reportRetry.get(a.id) ?? 0)) {
+      if (wasAttempted(a) && a.is_progress === 2 && !reported.has(reportKey(a)) && Date.now() >= (reportRetry.get(a.id) ?? 0)) {
         const ok = await reportResult(a);
         if (!ok) reportRetry.set(a.id, Date.now() + 60000);
       }
@@ -906,9 +932,11 @@ async function main() {
     return;
   }
 
-  // muat riwayat laporan dari disk — tanpa ini, restart bot bikin event yang
-  // sudah dilaporkan terkirim ulang ke HP.
+  // muat riwayat dari disk: laporan yang sudah dikirim (biar restart nggak
+  // mengirim ulang) dan event yang sudah ditembak (biar laporan yang tertunda ke
+  // run berikutnya tetap bisa dikirim).
   for (const k of loadReported()) reported.add(k);
+  for (const k of loadAttemptedKeys()) attemptedPrev.add(k);
 
   for (const acct of ACCOUNTS) {
     const u = await fetchUserInfo(acct).catch(() => null);

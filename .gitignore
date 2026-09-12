@@ -6,6 +6,7 @@ config.json
 *.log
 *-state.json
 reported-events.json
+attempted-events.json
 .cache/
 
 # Artifact migrasi
