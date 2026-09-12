@@ -1,13 +1,14 @@
 # Daily Free Blind Box draw — khusus 3 akun (West said, Boxkia 27895, Femzy).
-# Dijalankan 2x sehari: tengah malam WIB (reset timer) dan siang WIB (jaga-jaga).
+# Reset box itu 24 jam BERGULIR dari draw terakhir tiap akun (bukan jam 00:00
+# global), jadi cron-nya jalan TIAP JAM. Script-nya sendiri cuma notif kalau
+# ada yang benar-benar di-draw — run yang cuma ngecek itu diam.
 name: boxkia-freebox
 
 on:
   repository_dispatch:
     types: [freebox]
   schedule:
-    - cron: '0 17 * * *'   # 00:00 WIB (17:00 UTC) — waktu reset daily box
-    - cron: '0 6 * * *'    # 13:00 WIB (06:00 UTC) — jaga-jaga
+    - cron: '0 * * * *'    # tiap jam — nangkep semua jam reset akun
   workflow_dispatch:
 
 concurrency:

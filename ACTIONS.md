@@ -1,8 +1,10 @@
 # Deploy ke GitHub Actions (gratis, tanpa kartu kredit) 🐙
 
-Bot jalan sebagai **workflow** di GitHub — bukan VM. Tiap 5 menit job mengecek
-jadwal; kalau ada event mulai ≤ 6 menit lagi, job tidur sampai fast window,
-burst join, lapor hasil, lalu keluar.
+Bot jalan sebagai **workflow** di GitHub — bukan VM. Tiap 5 menit job dicek
+jadwal; begitu ada event yang mau mulai, job **arm** (berhenti polling jadwal),
+menghitung jam tembak absolut, tidur presisi sampai waktunya, nembak join, lalu
+melapor. Satu run bertahan sampai `ACTIONS_BUDGET_MS` (default 10 menit) — jadi
+event yang jatuh di antara dua tick tetap ketangkep dan tidak pernah telat.
 
 ⚠️ **Cron GitHub TIDAK dipakai** — schedule-nya tidak reliable (delay lama /
 tidak jalan di repo baru). Pemicu utama = `repository_dispatch` yang dikirim
@@ -11,8 +13,8 @@ oleh **cron-job.org** (gratis, tanpa kartu) setiap 5 menit.
 ## Kenapa repo public?
 
 - **Public repo = menit Actions tak terbatas** (gratis).
-- **Private repo = 2.000 menit/bulan** — bot kita butuh ±2.000 menit/bulan
-  (11 event/hari × ±6 menit) → mepet banget.
+- **Private repo = 2.000 menit/bulan** — sekarang tiap run bisa nyala sampai 10
+  menit (nunggu event), jadi kuota private cepat habis. Pakai repo **Public**.
 - Token akun tetap aman walau repo public karena disimpan di **Secrets**
   (nggak pernah ikut ter-commit / terlihat).
 
@@ -37,7 +39,7 @@ oleh **cron-job.org** (gratis, tanpa kartu) setiap 5 menit.
 5. **Tes:** tab *Actions* → pilih workflow `boxkia-event` → **Run workflow**
    (tombol kiri atas) → buka run-nya → lihat log: harusnya ada
    `Login OK` 9 akun + `⏳ event berikutnya ... keluar` (kalau nggak ada event
-   dalam 6 menit). Notifikasi ntfy juga bisa dicek.
+   dalam 10 menit). Notifikasi ntfy juga bisa dicek.
 
 ## Pemicu otomatis — cron-job.org (langkah terakhir, biar laptop bisa dimatikan)
 
@@ -71,12 +73,15 @@ oleh **cron-job.org** (gratis, tanpa kartu) setiap 5 menit.
 
 ## Catatan penting
 
-- **Latensi:** runner GitHub (US/EU) → API Jakarta ±100–250 ms lebih lambat
-  dari rumah → peluang menang race 70-slot sedikit lebih kecil. Itu alasan
-  kenapa bot rumah (laptop/HP) tetap lebih unggul; Actions ini oke sebagai
-  **pengganti** kalau nggak ada device nyala, atau sebagai **backup**.
-- **Cron jitter:** job bisa telat mulai ±1–2 menit — sudah diantisipasi dengan
-  horizon 6 menit + tidur sampai fast window.
+- **Latensi:** runner GitHub (US/EU) → API Jakarta ±200–400 ms lebih lambat dari
+  rumah. Lead time tembakan sekarang menyesuaikan RTT otomatis (RTT × 0.6), jadi
+  request pertama mendarat tepat saat event dibuka — tapi kalau kuota 100 slot
+  habis dalam <200 ms, runner US memang masih kalah dari orang yang koneksinya ke
+  Jakarta. Untuk race yang benar-benar ketat, jalankan bot di VPS region
+  **Singapore** (`fly.toml`, lihat `FLYIO.md`) — RTT-nya ±50–80 ms.
+- **Cron jitter:** job bisa telat mulai ±1–2 menit — sekarang diantisipasi dengan
+  budget 10 menit per run (lebih besar dari jeda tick 5 menit), jadi telat
+  beberapa menit pun tetap ke-join.
 - **JANGAN commit `config.json` asli** ke repo public — token bisa dicuri.
 - Kalau mau ubah frekuensi scan SP: edit `cron` di `.github/workflows/boxkia-sp.yml`.
 - Mau hapus semuanya? Settings repo → *Danger Zone → Delete this repository*.

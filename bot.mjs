@@ -7,9 +7,10 @@
  * Cara kerja:
  *   1. Polling GET  /activity/luckyBag/list  per akun (jadwal + is_join + spend per akun)
  *   2. Pantau countdown (diff_time_start) tiap event target
- *   3. Tepat saat mulai (atau beberapa ms sebelum, lihat earlyFireMs),
- *      tembak POST /activity/luckyBag/join  {id}  berulang-ulang (burst)
- *      sampai sukses (code==0) atau batas waktu retryMaxMs habis.
+ *   3. Begitu event masuk armWindowMs, berhenti polling jadwal → hitung waktu
+ *      tembak absolut (mulai − lead, lead nyesuaikan RTT) → tidur presisi →
+ *      tembak POST /activity/luckyBag/join {id} paralel (lihat joinConcurrency)
+ *      sampai ada vonis: sukses / sudah ikut / gagal permanen / timeout.
  *
  * Token login di config.json — cara ambilnya ada di README.md.
  * Zero dependency: Node 18+ (pakai fetch bawaan).
@@ -22,8 +23,9 @@
  *   node bot.mjs --saldo      — tampilkan saldo & poin tiap akun, lalu keluar
  *   node bot.mjs --sp         — scan barang SP & cek "roll tanpa SP" vs "avg rolls" (due checker)
  *   node bot.mjs --jadwal     — kirim ringkasan jadwal hari ini + akun yang bisa ikut ke ntfy
- *   node bot.mjs --actions    — mode GitHub Actions (single-shot): kalau ada event mulai
- *                                <= 6 menit lagi, tidur sampai fast window lalu burst join
+ *   node bot.mjs --actions    — mode GitHub Actions (single-shot): selama budget
+ *                                (actionsBudgetMs) bot menunggu presisi lalu join,
+ *                                habis itu keluar — tick berikutnya lanjut lagi
  *
  * Config tambahan:
  *   dailyScheduleHour — jam (0-23) kirim ringkasan jadwal harian ke ntfy sekali sehari (0 = tengah malam)
@@ -39,15 +41,33 @@ const CFG = {
   accounts: [],
   targetType: 'all',           // 1 = angpao, 0 = free box, 'all' = keduanya
   pollIntervalMs: 2000,        // polling normal
-  fastPollIntervalMs: 250,     // polling cepat saat event mendekati mulai
-  fastWindowMs: 30000,         // mulai polling cepat X ms sebelum mulai
-  earlyFireMs: 400,            // tembak join X ms SEBELUM waktu mulai
-  retryIntervalMs: 120,        // jeda antar tembakan di dalam burst
+  minEarlyFireMs: 120,         // lead time minimal (earlyFireMs lama = 3000ms DIABAIKAN, lihat effectiveLead)
+  maxEarlyFireMs: 900,         // batas atas lead adaptif (RTT dari GitHub Actions bisa 200-400ms)
+  retryIntervalMs: 120,        // jeda antar putaran tembakan di dalam burst
   retryMaxMs: 8000,            // durasi maksimal burst
+  joinConcurrency: 2,          // jumlah request join PARALEL per akun (spray) — 1 = sequential
+  joinTimeoutMs: 3000,         // timeout tiap request join (harus < retryMaxMs)
+  armWindowMs: 20000,          // X ms sebelum mulai: berhenti polling jadwal, tidur presisi
+  postFireCooldownMs: 1500,    // jeda santai setelah nembak, biar nggak rebutan request list
+  actionsBudgetMs: 600000,     // mode Actions: berapa lama satu run boleh bertahan (ms)
   apiTimeoutMs: 15000,         // timeout tiap request API — cegah fetch macet membekukan bot
   ntfyTopic: '',
   ...JSON.parse(readFileSync(path.join(__dirname, 'config.json'), 'utf8')),
 };
+
+// Override tuning lewat env — dipakai buat tes (mis. BOXKIA_ARM_WINDOW_MS=99999999).
+for (const [key, env] of Object.entries({
+  armWindowMs: 'BOXKIA_ARM_WINDOW_MS',
+  retryMaxMs: 'BOXKIA_RETRY_MAX_MS',
+  maxEarlyFireMs: 'BOXKIA_MAX_EARLY_FIRE_MS',
+  pollIntervalMs: 'BOXKIA_POLL_MS',
+  joinConcurrency: 'BOXKIA_JOIN_CONCURRENCY',
+})) {
+  if (process.env[env]) CFG[key] = Number(process.env[env]);
+}
+// Override non-angka — dipakai buat tes lokal lawan mock API, dan buat ganti topik ntfy.
+if ('BOXKIA_API_BASE' in process.env) CFG.apiBase = process.env.BOXKIA_API_BASE;
+if ('BOXKIA_NTFY_TOPIC' in process.env) CFG.ntfyTopic = process.env.BOXKIA_NTFY_TOPIC;
 
 const BASE = (CFG.apiBase || 'https://api.boxkia.com/api/v2').replace(/\/$/, '');
 const TYPE_NAME = { 0: 'free-box', 1: 'angpao' };
@@ -116,7 +136,7 @@ async function ntfy(title, msg) {
   }
 }
 
-async function api(p, { account, method = 'GET', params, data } = {}) {
+async function api(p, { account, method = 'GET', params, data, timeoutMs } = {}) {
   const a = account || CFG;
   const url = new URL(BASE + p);
   for (const [k, v] of Object.entries(params || {})) url.searchParams.set(k, v);
@@ -131,10 +151,16 @@ async function api(p, { account, method = 'GET', params, data } = {}) {
       'User-Agent': UA,
     },
     body: data ? JSON.stringify(data) : undefined,
-    signal: AbortSignal.timeout(CFG.apiTimeoutMs),
+    signal: AbortSignal.timeout(timeoutMs ?? CFG.apiTimeoutMs),
   });
   return res.json();
 }
+
+// RTT ke API (EWMA) — dipakai buat ngatur lead time tembakan. Latensi dari
+// GitHub Actions (US) ke API Jakarta gampang 200-400ms, jauh lebih besar dari
+// latensi laptop lokal (±30ms). Kalau lead-nya nggak nyesuaikan RTT, request
+// pertama selalu datang telat dan kita kalah balapan.
+let LAST_RTT_MS = 0;
 
 function targetMatch(a) {
   if (CFG.targetType === 'all') return true;
@@ -170,7 +196,10 @@ async function fetchUserInfo(acct) {
 }
 
 async function loadSchedule(acct) {
+  const t0 = Date.now();
   const r = await api('/activity/luckyBag/list', { account: acct });
+  const rtt = Date.now() - t0;
+  LAST_RTT_MS = LAST_RTT_MS ? Math.round(LAST_RTT_MS * 0.6 + rtt * 0.4) : rtt;
   if (r.code !== 0) throw new Error(`list gagal: code=${r.code} msg=${r.msg}`);
   return r.data;
 }
@@ -196,41 +225,92 @@ function printSchedule(list) {
 
 /* ---------------- aksi utama ---------------- */
 
-async function joinBurst(a, acct, spend) {
-  const att = attempted.get(acct.key);
-  if (att.has(a.id)) return;
-  att.add(a.id);
-  attemptedAny.add(a.id);
-  const name = TYPE_NAME[a.type] || `type${a.type}`;
-  log(`⚡ [${acct.name}] FIRING ${name} #${a.id} (mulai ${a.start_time}) — burst ${CFG.retryMaxMs}ms`);
-  const deadline = Date.now() + CFG.retryMaxMs;
-  let last = '';
+/*
+ * Pelajaran dari log produksi — inilah yang bikin "telat / too slow":
+ *   • "1 Too slow, all gone"       → request datang setelah kuota habis.
+ *   • "1 Duplicate participation"  → akun SUDAH ikut. Kalau tetap ditembak 8 detik,
+ *                                    dia cuma nyolong bandwidth akun lain yang belum masuk.
+ *   • "20000 ... not eligible"     → syarat nggak dipenuhi; nembak ulang sia-sia.
+ * Jadi cuma error SEMENTARA (network/timeout/not-started) yang boleh di-retry.
+ * Sisanya berhenti saat itu juga, biar burst-nya efisien dan akun lain kebagian.
+ */
+function classifyJoin(r) {
+  const code = r?.code;
+  const msg = String(r?.msg || '');
+  if (code === 0) return { kind: 'ok' };
+  if (code === 10003 || /login\s*required/i.test(msg)) return { kind: 'terminal', reason: 'token mati/kosong' };
+  if (/duplicate/i.test(msg)) return { kind: 'already' };
+  if (/too slow|all gone|sold out|habis|ended|finished/i.test(msg)) return { kind: 'terminal', reason: 'kalah cepat — kuota habis' };
+  if (code === 20000 || /not eligible/i.test(msg)) return { kind: 'terminal', reason: msg.trim() || 'tidak memenuhi syarat' };
+  return { kind: 'retry', reason: `${code ?? '?'} ${msg}`.trim() };
+}
+
+async function tryJoin(acct, a) {
+  try {
+    const r = await api('/activity/luckyBag/join', {
+      account: acct, method: 'POST', data: { id: a.id },
+      timeoutMs: Math.min(Number(CFG.joinTimeoutMs) || 3000, CFG.retryMaxMs),
+    });
+    return classifyJoin(r);
+  } catch (e) {
+    const reason = e?.name === 'TimeoutError' ? `timeout ${CFG.joinTimeoutMs}ms` : String(e?.message || e);
+    return { kind: 'retry', reason };
+  }
+}
+
+// satu akun: spray `joinConcurrency` request paralel per putaran sampai ada vonis.
+// Paralel penting di cloud — RTT ke Jakarta dari runner US bisa 200-400ms, jadi
+// kirim 1 request lalu tunggu balasan itu lambat banget buat rebutan kuota 100 orang.
+async function joinOne(acct, a, deadline) {
+  const conc = Math.max(1, Number(CFG.joinConcurrency) || 1);
+  let last = 'belum sempat';
   while (Date.now() < deadline) {
-    if (DRY) {
-      log(`  [dry-run] ${acct.name} akan join #${a.id} — tidak benar-benar dikirim`);
-      return;
-    }
-    try {
-      const r = await api('/activity/luckyBag/join', { account: acct, method: 'POST', data: { id: a.id } });
-      if (r.code === 0) {
-        joined.get(acct.key).add(a.id);
-        const msg = `✅ [${acct.name}] BERHASIL ikut ${name} #${a.id} (${a.start_time}) — undian saat penuh`;
-        log(msg);
-        await ntfy('Boxkia: ikut berhasil', msg);
-        return;
-      }
-      if (r.code === 10003) {
-        log(`  ⛔ [${acct.name}] Login required — token salah/kosong. Isi config.json (lihat README).`);
-        return;
-      }
-      last = `${r.code} ${r.msg || ''}`.trim();
-    } catch (e) {
-      last = String(e?.message || e);
-    }
+    const round = await Promise.all(Array.from({ length: conc }, () => tryJoin(acct, a)));
+    // utamakan 'ok': kalau 2 request paralel sama-sama diterima server, yang satu
+    // balik code 0 dan yang lain "duplicate" — laporannya harus tetap "ikut"
+    const decided = round.find((x) => x.kind === 'ok') || round.find((x) => x.kind !== 'retry');
+    if (decided) return decided;
+    last = round[round.length - 1]?.reason || last;
     await sleep(CFG.retryIntervalMs);
   }
-  log(`  ⏹ [${acct.name}] ${name} #${a.id} — tidak berhasil dalam ${CFG.retryMaxMs}ms. Pesan terakhir: ${last}`);
-  await ntfy('Boxkia: join gagal', `[${acct.name}] ${name} #${a.id} (${a.start_time})\n${last}`);
+  return { kind: 'timeout', reason: last };
+}
+
+async function fireBurst(a, accts) {
+  const pending = accts.filter((acct) => !attempted.get(acct.key)?.has(a.id));
+  if (!pending.length) return;
+  for (const acct of pending) attempted.get(acct.key).add(a.id);
+  attemptedAny.add(a.id);
+
+  const name = TYPE_NAME[a.type] || `type${a.type}`;
+  if (DRY) {
+    log(`  [dry-run] ${pending.length} akun akan join ${name} #${a.id} (${a.start_time}) — tidak dikirim`);
+    return;
+  }
+
+  log(`⚡ ${name} #${a.id} (${a.start_time}) — ${pending.length} akun nembak (conc ${CFG.joinConcurrency}, burst ${CFG.retryMaxMs}ms)`);
+  const deadline = Date.now() + CFG.retryMaxMs;
+  const started = Date.now();
+  const outcomes = await Promise.all(pending.map(async (acct, idx) => {
+    // stagger ringan: hindari 9 koneksi baru di millisecond yang sama persis,
+    // tapi tetap rapat (maks 120ms) biar akun terakhir nggak kalah start
+    if (idx) await sleep(Math.min(idx * 15, 120));
+    const res = await joinOne(acct, a, deadline);
+    if (res.kind === 'ok') joined.get(acct.key).add(a.id);
+    return { acct, res };
+  }));
+
+  const lines = outcomes.map(({ acct, res }) => {
+    if (res.kind === 'ok') return `✅ ${acct.name} — IKUT (masuk undian)`;
+    if (res.kind === 'already') return `🟡 ${acct.name} — sudah ikut sebelumnya`;
+    if (res.kind === 'timeout') return `⏹ ${acct.name} — mentok ${CFG.retryMaxMs}ms (${res.reason})`;
+    return `⛔ ${acct.name} — ${res.reason}`;
+  });
+  const okN = outcomes.filter((o) => o.res.kind === 'ok').length;
+  const dupN = outcomes.filter((o) => o.res.kind === 'already').length;
+  const head = `${name} #${a.id} (${a.start_time}) — ✅${okN} ikut · 🟡${dupN} sudah · ⛔${outcomes.length - okN - dupN} gagal · ${Date.now() - started}ms`;
+  log(`📣 ${head}\n${lines.join('\n')}`);
+  await ntfy(okN ? '✅ Boxkia: ikut berhasil' : '⚠️ Boxkia: ada yang gagal', `${head}\n${lines.join('\n')}`);
 }
 
 /* ---------------- laporan hasil undian ---------------- */
@@ -407,12 +487,57 @@ async function scanSpDue() {
 
 let lastOverview = 0;
 const reportRetry = new Map(); // eventId -> kapan boleh coba laporan lagi (ms)
+const skipLogged = new Map();  // "key:id" -> alasan skip terakhir (biar log nggak spam tiap poll)
+
+/* ---------------- penjadwal presisi: ARM → FIRE ----------------
+ * Dulu bot memakai "fast poll": tempur jadwal tiap 250ms di 30 detik terakhir.
+ * Dua masalahnya: (1) granularitas poll 250ms bikin tembakan pertama meleset,
+ * (2) 9 akun × 4 request jadwal/detik = ±36 req/detik di detik paling kritis —
+ *     justru di saat itu semua bandwidth/rate-limit dipakai buat request yang
+ *     nggak perlu.
+ * Sekarang: begitu event masuk armWindowMs, bot BERHENTI polling jadwal,
+ * menghitung jam tembak absolut (mulai − lead, lead nyesuaikan RTT), tidur
+ * presisi, lalu nembak. Nol request jadwal di detik-detik kritis.
+ */
+const armed = new Map(); // eventId -> { a, accts, fireAt }
+
+/* Lead time = perkiraan waktu tempuh request ke server (RTT × 0.6), dibatasi
+ * [minEarlyFireMs, maxEarlyFireMs]. Ini yang bikin request pertama MENDARAT tepat
+ * di detik event dibuka, bukan sesudahnya.
+ * Catatan: earlyFireMs lama di config (3000ms) sengaja diabaikan — nembak 3 detik
+ * sebelum event dibuka cuma menghasilkan putaran "not started" yang mubazir di
+ * detik paling kritis, dan di log malah pernah balik "duplicate participation". */
+function effectiveLead() {
+  const min = Math.max(0, Number(CFG.minEarlyFireMs ?? 120));
+  const max = Math.max(min, Number(CFG.maxEarlyFireMs) || 900);
+  return Math.round(Math.min(max, Math.max(min, (LAST_RTT_MS || 0) * 0.6)));
+}
+
+function nextFireAt() {
+  let m = Infinity;
+  for (const e of armed.values()) if (e.fireAt < m) m = e.fireAt;
+  return m;
+}
+
+async function sleepUntil(t) {
+  for (;;) {
+    const d = t - Date.now();
+    if (d <= 0) return;
+    await sleep(d > 80 ? d - 25 : d);
+  }
+}
+
+async function fireArmed() {
+  if (!armed.size) return 0;
+  const due = [...armed.entries()].filter(([, e]) => Date.now() >= e.fireAt - 2);
+  for (const [id] of due) armed.delete(id);
+  await Promise.all(due.map(([, e]) => fireBurst(e.a, e.accts)));
+  return due.length;
+}
 
 async function loopOnce(forceOverview = false) {
   const fetchTime = Date.now();
-  let fast = false;
   let scheduleList = null;
-  const bursts = [];
 
   // fetch jadwal SEMUA akun secara paralel — biar semua akun nembak di momen yang sama
   const results = await Promise.all(ACCOUNTS.map(async (acct) => {
@@ -424,6 +549,8 @@ async function loopOnce(forceOverview = false) {
     }
   }));
 
+  // kumpulkan event target lintas akun: id -> { a, accts[] }
+  const targets = new Map();
   for (const res of results) {
     if (!res) continue;
     const { acct, data } = res;
@@ -432,37 +559,49 @@ async function loopOnce(forceOverview = false) {
     if (!scheduleList) scheduleList = list;
 
     for (const a of list) {
-      if (!targetMatch(a)) continue;
-      const att = attempted.get(acct.key);
-      const jo = joined.get(acct.key);
-      if (a.is_join == 1 || jo.has(a.id)) { att.add(a.id); attemptedAny.add(a.id); continue; }
-      if (a.is_progress === 2) continue;
+      if (!targetMatch(a) || a.is_progress === 2) continue;
+      if (a.is_join == 1 || joined.get(acct.key)?.has(a.id)) { attempted.get(acct.key).add(a.id); attemptedAny.add(a.id); continue; }
+      if (attempted.get(acct.key).has(a.id) || armed.get(a.id)?.accts.includes(acct)) continue;
       const why = ineligibleReason(a, spends.get(acct.key), users.get(acct.key));
       if (why) {
-        if (!att.has(a.id)) {
-          att.add(a.id);
+        // JANGAN tandai attempted — kalau nanti akun jadi eligible (mis. habis belanja),
+        // event ini masih bisa ditembak. Log-nya cukup sekali per alasan.
+        const sk = `${acct.key}:${a.id}`;
+        if (skipLogged.get(sk) !== why) {
+          skipLogged.set(sk, why);
           log(`  ⏭ [${acct.name}] skip #${a.id} (${a.start_time}, ${TYPE_NAME[a.type]}) — ${why}`);
         }
         continue;
       }
-      const startsIn = (a.diff_time_start ?? 0) - (Date.now() - fetchTime);
-      if (a.is_progress === 1 || startsIn <= CFG.earlyFireMs) {
-        bursts.push(joinBurst(a, acct, spends.get(acct.key)));
-      } else if (startsIn < CFG.fastWindowMs) {
-        fast = true;
-      }
+      if (!targets.has(a.id)) targets.set(a.id, { a, accts: [] });
+      targets.get(a.id).accts.push(acct);
     }
   }
 
-  // lapor hasil undian untuk event target yang sudah selesai & pernah dicoba
-  // (kalau record masih kosong, coba lagi 60 detik kemudian)
-  if (scheduleList) {
+  // arm yang sebentar lagi mulai; tembak yang sudah waktunya
+  const now = Date.now();
+  const lead = effectiveLead();
+  const fireNow = [];
+  let soonestStartsIn = Infinity;
+  for (const { a, accts } of targets.values()) {
+    const startsIn = (a.diff_time_start ?? 0) - (now - fetchTime);
+    if (startsIn < soonestStartsIn) soonestStartsIn = startsIn;
+    if (a.is_progress === 1 || startsIn <= lead) {
+      fireNow.push(fireBurst(a, accts));
+    } else if (startsIn <= CFG.armWindowMs) {
+      armed.set(a.id, { a, accts, fireAt: now + startsIn - lead });
+      log(`🛡 arm ${TYPE_NAME[a.type]} #${a.id} — tembak dalam ${Math.round(startsIn - lead)}ms (${accts.length} akun, lead ${lead}ms)`);
+    }
+  }
+
+  // lapor hasil undian untuk event yang sudah selesai & pernah dicoba.
+  // Ditunda kalau ada event yang lagi di-arm / baru ditembak — request laporan
+  // nggak boleh nyolong waktu kritis.
+  if (scheduleList && !armed.size && !targets.size) {
     for (const a of scheduleList) {
-      if (attemptedAny.has(a.id) && a.is_progress === 2 && !reported.has(a.id)) {
-        if (Date.now() >= (reportRetry.get(a.id) ?? 0)) {
-          const ok = await reportResult(a);
-          if (!ok) reportRetry.set(a.id, Date.now() + 60000);
-        }
+      if (attemptedAny.has(a.id) && a.is_progress === 2 && !reported.has(a.id) && Date.now() >= (reportRetry.get(a.id) ?? 0)) {
+        const ok = await reportResult(a);
+        if (!ok) reportRetry.set(a.id, Date.now() + 60000);
       }
     }
   }
@@ -472,8 +611,8 @@ async function loopOnce(forceOverview = false) {
     lastOverview = Date.now();
   }
 
-  await Promise.all(bursts);
-  return fast;
+  await Promise.all(fireNow);
+  return { armedCount: armed.size, nextFire: nextFireAt(), soonestStartsIn, hasTarget: targets.size > 0 };
 }
 
 /* ---------------- mode GitHub Actions (single-shot) ---------------- */
@@ -481,7 +620,10 @@ async function loopOnce(forceOverview = false) {
 // Mode ini: job cron tiap 5 menit -> kalau ada event target mulai <= 6 menit lagi,
 // tidur sampai fast window -> fast-poll + burst join -> lapor hasil -> keluar.
 // State (jadwal harian + event yang sudah dilapor) persist lewat DATA_DIR (cache Actions).
-const ACTIONS_HORIZON = 6 * 60 * 1000; // ms: hanya tangani event yang mulai <= 6 menit lagi (diff_time_start dalam ms)
+// Budget satu run — HARUS lebih besar dari jeda tick cron (5 menit). Dengan budget
+// 10 menit, tiap event PASTI ketangkep: selalu ada tick yang datang <= 5 menit
+// sebelum event, dan run itu tidur presisi sampai waktu tembak. Ini yang menghapus
+// "telat" akibat runner GitHub nyala lambat atau dispatch repository_dispatch telat.
 
 async function actionsMode() {
   // jadwal harian: kirim sekali sehari (state tersimpan di DATA_DIR/cache)
@@ -503,56 +645,32 @@ async function actionsMode() {
     await reportDailySchedule();
   }
 
-  // fetch jadwal semua akun + refresh spend
-  const results = await Promise.all(ACCOUNTS.map(async (acct) => {
-    try { return { acct, data: await loadSchedule(acct) }; }
-    catch (e) { log(`⚠ [${acct.name}] error fetch list: ${e?.message || e}`); return null; }
-  }));
-  for (const r of results) {
-    if (r) spends.set(r.acct.key, r.data.activity_info?.user_spend_amount ?? 0);
-  }
-  const first = results.find((r) => r && r.data);
-  if (!first) { log('⚠ tidak ada data jadwal — keluar'); return; }
+  const budgetMs = Math.max(60000, Number(process.env.ACTIONS_BUDGET_MS || CFG.actionsBudgetMs) || 600000);
+  const budgetEnd = Date.now() + budgetMs;
+  log(`🕒 sesi Actions — budget ${Math.round(budgetMs / 1000)}s`);
 
-  const events = (first.data.list || [])
-    .filter((a) => targetMatch(a) && a.is_progress !== 2)
-    .sort((a, b) => a.diff_time_start - b.diff_time_start);
-
-  // lapor hasil undian untuk event yang sudah selesai & belum pernah dilaporkan
-  for (const a of first.data.list || []) {
-    if (a.is_progress === 2 && !reported.has(a.id)) {
-      const ok = await reportResult(a);
-      // reportResult already updates `reported` + saves to disk
+  for (;;) {
+    // ada event yang sudah di-arm → tidur presisi sampai waktu tembak (tanpa polling jadwal)
+    const nf = nextFireAt();
+    if (Number.isFinite(nf)) {
+      if (nf >= budgetEnd) { log('⏳ tembakan berikutnya di luar budget sesi ini — keluar'); break; }
+      log(`💤 tidur presisi ${((nf - Date.now()) / 1000).toFixed(1)}s sampai waktu tembak...`);
+      await sleepUntil(nf - 2);
+      if (await fireArmed()) await sleep(Number(CFG.postFireCooldownMs) || 1500);
+      continue;
     }
-  }
 
-  // cari event berikutnya yang masih bisa diikuti (ada akun eligible)
-  const next = events.find((a) => {
-    if (a.is_join == 1) return false;
-    return ACCOUNTS.some((acct) => !ineligibleReason(a, spends.get(acct.key) ?? 0, users.get(acct.key)));
-  });
-  if (!next) { log('⏳ tidak ada event yang bisa diikuti hari ini — keluar'); return; }
+    const left = budgetEnd - Date.now();
+    if (left <= 0) { log('⏳ budget sesi habis — keluar'); break; }
 
-  const startsIn = next.diff_time_start ?? 0; // ms
-  if (startsIn > ACTIONS_HORIZON) {
-    log(`⏳ event berikutnya #${next.id} (${next.start_time}) mulai dalam ${Math.round(startsIn / 1000)}s — di luar horizon ${ACTIONS_HORIZON / 1000}s, keluar`);
-    return;
-  }
-
-  log(`🎯 event #${next.id} (${next.start_time}) mulai dalam ${Math.round(startsIn / 1000)}s — tunggu fast window`);
-  const wakeAt = Date.now() + Math.max(0, startsIn - CFG.fastWindowMs);
-  const waitMs = wakeAt - Date.now();
-  if (waitMs > 1000) {
-    log(`💤 tidur ${Math.round(waitMs / 1000)}s sampai fast window...`);
-    await sleep(waitMs);
-  }
-
-  // fast loop: loopOnce berulang — burst join terjadi di dalamnya saat event mulai
-  const deadline = Date.now() + CFG.fastWindowMs + CFG.retryMaxMs + 15000;
-  while (Date.now() < deadline) {
-    const f = await loopOnce();
-    await sleep(f ? CFG.fastPollIntervalMs : 250);
-    if (Date.now() > wakeAt + CFG.fastWindowMs + CFG.retryMaxMs) break;
+    const st = await loopOnce();
+    if (st.hasTarget || st.armedCount) { await sleep(200); continue; }
+    if (!Number.isFinite(st.soonestStartsIn)) { log('✅ tidak ada event target tersisa hari ini — keluar'); break; }
+    if (st.soonestStartsIn > left) {
+      log(`⏳ event berikutnya ${Math.round(st.soonestStartsIn / 1000)}s lagi (budget tersisa ${Math.round(left / 1000)}s) — keluar, tick berikutnya yang lanjut`);
+      break;
+    }
+    await sleep(Math.min(2000, st.soonestStartsIn));
   }
 
   log('✅ sesi Actions selesai');
@@ -583,7 +701,11 @@ async function main() {
   if (args.has('--sp')) { await scanSpDue(); return; }
   if (args.has('--jadwal')) { await reportDailySchedule(); return; }
   if (args.has('--actions')) { await actionsMode(); return; }
-  if (args.has('--check') || args.has('--once')) { await loopOnce(true); return; }
+  if (args.has('--check') || args.has('--once')) {
+    await loopOnce(true);
+    if (armed.size) { await sleepUntil(nextFireAt() - 2); await fireArmed(); }
+    return;
+  }
 
   const targetLabel = CFG.targetType === 'all' ? 'semua type (angpao + free box)' : TYPE_LABEL[CFG.targetType] || CFG.targetType;
   log(`🤖 Bot jalan (${ACCOUNTS.length} akun). Ctrl+C untuk berhenti. Target: ${targetLabel}`);
@@ -596,7 +718,15 @@ async function main() {
   const dailyState = loadDailyState();
   while (true) {
     try {
-      const fast = await loopOnce();
+      // ada event yang sudah di-arm → tidur presisi lalu tembak (tanpa polling jadwal)
+      const nf = nextFireAt();
+      if (Number.isFinite(nf)) {
+        await sleepUntil(nf - 2);
+        if (await fireArmed()) await sleep(Number(CFG.postFireCooldownMs) || 1500);
+        continue;
+      }
+
+      await loopOnce();
       const now = new Date();
       if (now.toLocaleDateString('id-ID') !== dailyState.lastDate && now.getHours() >= (CFG.dailyScheduleHour ?? 0)) {
         dailyState.lastDate = now.toLocaleDateString('id-ID');
@@ -619,7 +749,7 @@ async function main() {
           }
         }
       }
-      await sleep(fast ? CFG.fastPollIntervalMs : CFG.pollIntervalMs);
+      await sleep(armed.size ? 20 : CFG.pollIntervalMs);
     } catch (e) {
       log('⚠ error loop:', e?.message || e);
       await sleep(CFG.pollIntervalMs);

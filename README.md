@@ -84,19 +84,28 @@ Hapus: `Unregister-ScheduledTask -TaskName 'BoxkiaSpWatch' -Confirm:$false`
 | `apiBase` | Base URL API (default `https://api.boxkia.com/api/v2` — jangan diganti kecuali tahu apa yang dilakukan) |
 | `targetType` | `1` = angpao saja, `0` = free box saja, `all` = keduanya |
 | `pollIntervalMs` | Jeda polling jadwal normal (default 2000 ms) |
-| `fastPollIntervalMs` | Jeda polling cepat menjelang event (default 250 ms) |
-| `fastWindowMs` | Mulai polling cepat X ms sebelum mulai (default 30000) |
-| `earlyFireMs` | Tembak join X ms *sebelum* waktu mulai (default 400) |
-| `retryIntervalMs` | Jeda antar tembakan di dalam burst (default 120 ms) |
+| `armWindowMs` | X ms sebelum mulai bot berhenti polling jadwal, hitung waktu tembak, lalu tidur presisi (default 20000) |
+| `minEarlyFireMs` / `maxEarlyFireMs` | Batas lead time tembakan (default 120 / 900 ms). Lead aslinya mengikuti RTT ke API × 0.6 — di cloud RTT-nya jauh lebih besar dari lokal, jadi lead-nya menyesuaikan sendiri. **`earlyFireMs` lama (3000 ms) sudah diabaikan** karena nembak 3 detik kelewat awal cuma buang putaran "not started" |
+| `joinConcurrency` | Jumlah request `join` paralel per akun (default 2). Naikkan kalau mau lebih agresif saat rebutan kuota |
+| `joinTimeoutMs` | Timeout tiap request join (default 3000 ms) — harus < `retryMaxMs` supaya satu request macet tidak menelan seluruh burst |
+| `retryIntervalMs` | Jeda antar putaran tembakan di dalam burst (default 120 ms) |
 | `retryMaxMs` | Lama maksimal burst (default 8000 ms) |
+| `postFireCooldownMs` | Jeda santai setelah selesai nembak (default 1500 ms) — biar request jadwal berikutnya tidak ikut rebutan di detik kritis |
+| `actionsBudgetMs` | Mode `--actions`: lama satu run bertahan (default 600000 = 10 menit). **Wajib > jeda tick cron** supaya tiap event pasti ketangkep |
 | `apiTimeoutMs` | Timeout tiap request API (default 15000 ms) — mencegah fetch yang macet membekukan bot |
 | `ntfyTopic` | Topic ntfy.sh (opsional) untuk notifikasi ke HP saat berhasil/gagal, plus laporan hasil undian (`📊 Hasil …`) setelah event selesai dan laporan saldo (`💰 Saldo …`) saat bot start & tiap heartbeat |
 | `spCheckHours` | **Scanner SP otomatis** — kalau > 0 (mis. `1`), bot mengecek tiap X jam apakah ada barang yang SP-nya "jatuh tempo" (roll tanpa SP sudah melewati rata-rata) dan kirim notif `🔥` ke ntfy. Default `0` = mati |
 | `dailyScheduleHour` | Jam (0–23) kirim **ringkasan jadwal hari ini** (`📅`) ke ntfy — daftar event + akun mana yang memenuhi syarat (elig). Default `0` = tengah malam. Bisa kirim manual kapan saja dengan `node bot.mjs --jadwal` |
 
-Kalau sudah sering "kehabisan", coba kecilkan `pollIntervalMs` ke `1000`,
-`fastPollIntervalMs` ke `150`, dan `earlyFireMs` ke `0`… `1000`. Jangan terlalu
-agresif — kalau ketahuan membanjiri server, akun bisa kena batasan.
+Kalau sudah sering "kehabisan", naikkan `joinConcurrency` ke `3` dan kecilkan
+`retryIntervalMs` ke `80`. Jangan terlalu agresif — kalau ketahuan membanjiri
+server, akun bisa kena batasan.
+
+> **Kapan bot berhenti nembak?** Begitu dapat vonis dari server: `code 0` (ikut),
+> `duplicate` (sudah ikut), `too slow / all gone` (kuota habis), `not eligible`,
+> atau `login required`. Dulu semua error itu diulang selama 8 detik penuh —
+> percuma, dan justru menyita bandwidth akun yang masih berpeluang. Sekarang
+> hanya error sementara (timeout/network) yang di-retry.
 
 ## Multi-akun
 

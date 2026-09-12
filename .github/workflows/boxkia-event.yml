@@ -1,13 +1,17 @@
-# Bot event Boxkia — jalan tiap 5 menit via cron.
-# Kalau ada event mulai <= 6 menit lagi, job tidur sampai fast window,
-# burst join, lapor hasil, lalu keluar. State persist lewat cache (.cache).
+# Bot event Boxkia — dipicu tiap 5 menit (cron-job.org + cron GitHub sebagai cadangan).
+# Tiap run bertahan sampai ACTIONS_BUDGET_MS (default 10 menit), jadi event yang
+# jatuh di antara dua tick tetap ketangkep: run-nya tidur presisi sampai waktu tembak.
+# Budget > jeda tick = nggak ada lagi event yang telat ke-join.
 name: boxkia-event
 
 on:
-  # Cron GitHub nggak reliable (delay lama / nggak jalan di repo baru) —
-  # pemicu utama pakai repository_dispatch dari cron eksternal (cron-job.org).
+  # Pemicu utama: repository_dispatch dari cron eksternal (cron-job.org).
   repository_dispatch:
     types: [tick]
+  # Cadangan kalau cron-job.org mati. Cron GitHub memang suka telat, tapi dengan
+  # budget 10 menit telat beberapa menit pun masih ketangkep.
+  schedule:
+    - cron: '*/5 * * * *'
   workflow_dispatch: # tombol "Run workflow" buat tes manual
 
 concurrency:
@@ -38,9 +42,10 @@ jobs:
           key: boxkia-event-state-v1
           restore-keys: boxkia-event-state-v1
 
-      - name: Jalankan bot (sleep-until-event)
+      - name: Jalankan bot (arm → tidur presisi → join)
         env:
           DATA_DIR: ${{ github.workspace }}/.cache
+          ACTIONS_BUDGET_MS: '600000' # 10 menit — wajib > jeda tick cron (5 menit)
         run: node bot.mjs --actions
 
       - name: Bersihkan log (biar cache nggak gendut)
