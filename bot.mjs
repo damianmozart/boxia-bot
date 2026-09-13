@@ -33,7 +33,8 @@
  *   dailyScheduleHour — jam (0-23) kirim ringkasan jadwal harian ke ntfy sekali sehari (0 = tengah malam)
  */
 
-import { readFileSync, appendFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { readFileSync, appendFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -56,6 +57,7 @@ const CFG = {
   freeBoxDelayMs: 1000,        // free-box: join mendarat X ms SETELAH mulai
   freeBoxDelayJitterMs: 300,   // tambahan acak 0..X ms, biar posisinya bervariasi
   postFireCooldownMs: 1500,    // jeda santai setelah nembak, biar nggak rebutan request list
+  freeBoxCheckMin: 15,         // menit antar cek Daily Free Blind Box dari laptop (0 = matikan)
   actionsBudgetMs: 600000,     // mode Actions: berapa lama satu run boleh bertahan (ms)
   waitResultMs: 180000,        // seberapa lama menunggu hasil undian muncul setelah nembak (ms)
   apiTimeoutMs: 15000,         // timeout tiap request API — cegah fetch macet membekukan bot
@@ -72,6 +74,7 @@ for (const [key, env] of Object.entries({
   freeBoxDelayJitterMs: 'BOXKIA_FREEBOX_JITTER_MS',
   pollIntervalMs: 'BOXKIA_POLL_MS',
   joinConcurrency: 'BOXKIA_JOIN_CONCURRENCY',
+  freeBoxCheckMin: 'BOXKIA_FREEBOX_CHECK_MIN',
 })) {
   if (process.env[env]) CFG[key] = Number(process.env[env]);
 }
@@ -133,6 +136,27 @@ function dropDuplicateAccounts() {
       log(`⚠ akun duplikat: [${a.name}] (user_id ${uid}) sama dengan [${first}] — dikeluarkan dari daftar.`);
     } else {
       seen.set(String(uid), a.name);
+    }
+  }
+
+  /* Kembar yang tokennya sudah mati nggak bisa dikenali lewat user_id (login-nya
+   * gagal, jadi user_id-nya nggak pernah ketahuan). Kalau nickname-nya sama dengan
+   * akun yang login sukses, itu hampir pasti duplikat usang: dulu dia muncul di
+   * daftar eligibility dengan tanda ✓ PALSU (karena data user-nya kosong, jadi
+   * dianggap memenuhi syarat) dan tiap run membuang satu slot tembakan + memicu
+   * error 10003 berulang. Sekarang dibuang, dan penyebabnya dilaporkan jelas. */
+  const okNames = new Set(
+    ACCOUNTS.filter((a) => users.get(a.key))
+      .map((a) => String(users.get(a.key).nickname || a.name || '').trim().toLowerCase())
+      .filter(Boolean)
+  );
+  for (let i = ACCOUNTS.length - 1; i >= 0; i--) {
+    const a = ACCOUNTS[i];
+    if (users.get(a.key)) continue;
+    const nm = String(a.name || '').trim().toLowerCase();
+    if (nm && okNames.has(nm)) {
+      ACCOUNTS.splice(i, 1);
+      log(`⚠ akun duplikat: [${a.name}] tokennya mati (visitorId: ${a.visitorId}) dan nickname-nya sama dengan akun yang login sukses — dikeluarkan dari daftar. Perbarui/hapus entri ini di config.json.`);
     }
   }
 }
@@ -277,11 +301,15 @@ function printSchedule(list) {
     const t = TYPE_NAME[a.type] || `type${a.type}`;
     const start = a.is_progress === 0 ? localTime(a.diff_time_start) : 'sedang jalan';
     const elig = ACCOUNTS.map((ac) => {
+      // token mati = bukan "eligible" — dulu ditandai ✓ karena data user-nya kosong.
+      if (!users.get(ac.key)) return `${ac.name}:!`;
       const why = ineligibleReason(a, spends.get(ac.key) ?? 0, users.get(ac.key));
       return `${ac.name}:${why ? '✗' : '✓'}`;
     }).join(' ');
     log(`  ${t.padEnd(8)} #${String(a.id).padEnd(4)} ${String(a.start_time).padEnd(11)} → ${start}  [${statusLabel(a)}] quota ${a.join_total}/${a.join_user_limit}  elig ${elig}`);
   }
+  const bad = ACCOUNTS.filter((ac) => !users.get(ac.key)).map((ac) => ac.name);
+  if (bad.length) log(`  (! = token tidak valid, akun tidak ikut: ${bad.join(', ')})`);
 }
 
 /* ---------------- aksi utama ---------------- */
@@ -630,16 +658,44 @@ async function reportDailySchedule() {
   const lines = [`📅 Jadwal hari ini — ${new Date().toLocaleDateString('id-ID')}`];
   for (const a of list) {
     const syarat = a.type === 0 ? `LV${a.level_limit || 0}` : (a.limit_price ? `belanja ${a.limit_price}` : '');
-    const elig = ACCOUNTS
+    const usable = ACCOUNTS.filter((acct) => users.get(acct.key));
+    const elig = usable
       .filter((acct) => !ineligibleReason(a, spends.get(acct.key) ?? 0, users.get(acct.key)))
       .map((acct) => acct.name);
-    const who = elig.length === 0 ? '—' : elig.length === ACCOUNTS.length ? 'semua akun ✓' : elig.join(', ');
+    const who = elig.length === 0 ? '—' : elig.length === usable.length ? 'semua akun ✓' : elig.join(', ');
     lines.push(`${a.start_time} ${TYPE_NAME[a.type]} #${a.id}${syarat ? ` (${syarat})` : ''} — ${who}`);
   }
   const msg = lines.join('\n');
   log(msg);
   await ntfy('📅 Boxkia: jadwal hari ini', msg);
   return true;
+}
+
+/* ---------------- Daily Free Blind Box (dari laptop) ---------------- */
+/* Reset box itu 24 jam BERGULIR per akun, jadi tiap akun punya jam reset sendiri.
+ * Di cloud ini ditangani workflow boxkia-freebox, tapi cloud bisa mati (Actions
+ * outage / cron kelewat) — kejadian nyata: box West said siap draw sejak 13:53
+ * dan belum ke-draw 2,5 jam kemudian karena semua run Actions dibatalkan.
+ * Karena bot ini sudah hidup terus di laptop, dia juga yang ngecek box-nya kini.
+ * Script freebox-draw.mjs idempoten: hanya DRAW kalau box benar-benar siap
+ * (status 1), jadi jalan dobel (lokal + cloud) tidak menghasilkan draw dobel. */
+async function runFreeBoxDraw() {
+  const script = path.join(__dirname, 'freebox-draw.mjs');
+  if (!existsSync(script)) return;
+  await new Promise((resolve) => {
+    const child = spawn(process.execPath, [script], { cwd: __dirname, windowsHide: true });
+    let out = '';
+    child.stdout?.on('data', (d) => { out += d; });
+    child.stderr?.on('data', (d) => { out += d; });
+    child.on('error', (e) => { log(`⚠ free box: gagal menjalankan script — ${e?.message || e}`); resolve(); });
+    child.on('close', (code) => {
+      // cukup baris pentingnya — biar log bot nggak dipenuhi status "sudah draw" tiap 15 menit
+      const keep = out.split('\n').filter((l) => /🎁|🎯|❌|⚠|MENANG/.test(l));
+      if (keep.length) log(`free box: ${keep.map((l) => l.replace(/^\[[^\]]*\]\s*/, '').trim()).join(' | ')}`);
+      else if (code !== 0) log(`⚠ free box: script keluar dengan code ${code}`);
+      resolve();
+    });
+  });
 }
 
 /* ---------------- scanner SP (roll tanpa SP vs avg rolls) ---------------- */
@@ -793,6 +849,9 @@ async function loopOnce(forceOverview = false) {
     const list = data.list || [];
     spends.set(acct.key, data.activity_info?.user_spend_amount ?? 0);
     if (!scheduleList) scheduleList = list;
+    // token mati: jangan pernah dianggap eligible (dulu lolos karena data user kosong,
+    // jadi tiap event dia ikut ditembak dan selalu balas 10003).
+    if (!users.get(acct.key)) continue;
 
     for (const a of list) {
       if (!targetMatch(a) || a.is_progress === 2) continue;
@@ -1014,6 +1073,8 @@ async function main() {
 
   let lastBeat = Date.now();
   let lastSpCheck = Date.now();
+  let lastFreeBoxCheck = 0;    // 0 = cek sekali begitu bot nyala, lalu tiap freeBoxCheckMin menit
+  const freeBoxEveryMs = (Number(CFG.freeBoxCheckMin) || 0) * 60000;
   const spNotified = new Set(); // id barang yang sudah di-notify "jatuh tempo" (biar nggak spam)
   const dailyState = loadDailyState();
   while (true) {
@@ -1035,6 +1096,11 @@ async function main() {
         dailyState.lastDate = now.toLocaleDateString('id-ID');
         saveDailyState(dailyState);
         await reportDailySchedule();
+      }
+      // Daily Free Blind Box — jangan jalan bareng event yang sudah di-arm (waktu kritis).
+      if (freeBoxEveryMs > 0 && !armed.size && Date.now() - lastFreeBoxCheck > freeBoxEveryMs) {
+        lastFreeBoxCheck = Date.now();
+        await runFreeBoxDraw();
       }
       if (CFG.heartbeatHours > 0 && Date.now() - lastBeat > CFG.heartbeatHours * 3600e3) {
         lastBeat = Date.now();

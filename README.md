@@ -102,6 +102,7 @@ Hapus: `Unregister-ScheduledTask -TaskName 'BoxkiaSpWatch' -Confirm:$false`
 | `waitResultMs` | Setelah nembak, bot menunggu hasil undian muncul lalu mengirim laporan posisi + berapa yang didapat (default 180000 = 3 menit). Laporan dikirim **menang maupun tidak** — bisa dipicu manual dengan `node bot.mjs --hasil`. Kalau record hari itu belum ada, bot **menunggu dan mencoba lagi**, bukan memakai record hari lain |
 | `spCheckHours` | **Scanner SP otomatis** — kalau > 0 (mis. `1`), bot mengecek tiap X jam apakah ada barang yang SP-nya "jatuh tempo" (roll tanpa SP sudah melewati rata-rata) dan kirim notif `🔥` ke ntfy. Default `0` = mati |
 | `dailyScheduleHour` | Jam (0–23) kirim **ringkasan jadwal hari ini** (`📅`) ke ntfy — daftar event + akun mana yang memenuhi syarat (elig). Default `0` = tengah malam. Bisa kirim manual kapan saja dengan `node bot.mjs --jadwal` |
+| `freeBoxCheckMin` | Menit antar cek **Daily Free Blind Box** (3 akun target) dari laptop ini — default `15`, `0` = matikan. Bot sudah hidup terus, jadi box-nya tetap terambil walau GitHub Actions sedang outage. Script-nya idempoten (hanya draw kalau statusnya benar-benar siap), jadi aman jalan dobel bareng cloud |
 
 Kalau sudah sering "kehabisan", naikkan `joinConcurrency` ke `3` dan kecilkan
 `retryIntervalMs` ke `80`. Jangan terlalu agresif — kalau ketahuan membanjiri
@@ -142,6 +143,20 @@ server, akun bisa kena batasan.
 > mencoba lagi** kalau record hari itu belum ada — tidak pernah memakai hari lain.
 > Laporan juga menuliskan harinya secara eksplisit: `(hari ini)` / `(kemarin)`.
 
+> **Arti tanda di daftar elig.** `✓` = memenuhi syarat, `✗` = tidak (level/belanja),
+> dan **`!` = token akun itu tidak valid** — akun itu tidak ikut event mana pun.
+> Dulu akun dengan token mati ditandai `✓` (karena data user-nya kosong, jadi
+> dianggap memenuhi syarat) dan tiap event tetap ditembak, selalu balas `10003`.
+> Sekarang token mati ditandai `!` dan tidak pernah ditembak.
+>
+> **Akun kembar dengan token mati dibuang otomatis.** Akun kembar bisa dikenali
+> dari `user_id` — tapi kalau tokennya sudah mati, login-nya gagal sehingga
+> `user_id`-nya tak diketahui. Karena itu bot juga mendeteksi **nickname yang sama
+> dengan akun yang login sukses** dan membuang entri yang tokennya mati itu
+> (log-nya menyebut `visitorId`-nya, mis. `boxkia-bot-1`, supaya gampang dicari
+> di `config.json`). Sebelumnya entri basi ini membuang satu slot tembakan tiap
+> event dan memunculkan baris kembar di laporan hasil undian.
+>
 > **Kapan bot berhenti nembak?** Begitu dapat vonis dari server: `code 0` (ikut),
 > `duplicate` (sudah ikut), `too slow / all gone` (kuota habis), `not eligible`,
 > atau `login required`. Dulu semua error itu diulang selama 8 detik penuh —
