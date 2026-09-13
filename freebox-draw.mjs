@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 /*
  * freebox-draw.mjs — automasi Daily Free Blind Box draw.
- * Khusus 3 akun: West said, Boxkia 27895 (403279), Femzy.
+ * Akun target ditentukan config `freeBoxTargets` (default: West said, Femzy,
+ * Boxkia 27895). Akun target harus ada di `accounts` (boleh ditandai
+ * `freeBoxOnly: true` supaya TIDAK ikut event treasure hunt).
  *
  * API:
  *   GET  /api/v3/home/extraIntegral/freeBlindBox/detail?blind_box_id=<id>
@@ -32,7 +34,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CFG = JSON.parse(readFileSync(path.join(__dirname, 'config.json'), 'utf8'));
 const BASE = 'https://api.boxkia.com/api/v3';
 const BOX_ID = Number(process.env.FREEBOX_ID || CFG.freeBoxId || 67122);
-const TARGETS = CFG.freeBoxTargets || ['West said', 'Femzy', 'Boxkia 27895'];
+const TARGETS = CFG.freeBoxTargets || ['West said', 'Femzy', 'Boxkia 27895', 'syawarman'];
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36';
 const DATA_DIR = process.env.DATA_DIR || __dirname;
 const LOG_FILE = path.join(DATA_DIR, 'freebox-draw.log');

@@ -108,6 +108,9 @@ function parseAccounts() {
       visitorId: a.visitorId || `boxkia-bot-${i}`,
       lang: a.lang || CFG.lang || 'id',
       name: a.name || `akun${i}`,
+      // akun ini hanya ikut Daily Free Blind Box, bukan event treasure hunt
+      // (angkpao/free-box event). Dipakai buat akun yang levelnya masih kecil.
+      freeBoxOnly: !!a.freeBoxOnly,
     });
   };
   if (Array.isArray(CFG.accounts) && CFG.accounts.length) {
@@ -119,6 +122,11 @@ function parseAccounts() {
 }
 
 const ACCOUNTS = parseAccounts();
+
+/* Akun yang ikut EVENT treasure hunt (angkpao & free-box event). Akun dengan
+ * `freeBoxOnly: true` dikecualikan. Sengaja fungsi — bukan konstanta — supaya
+ * daftarnya ikut terbarui setelah dropDuplicateAccounts() memangkas kembar. */
+const eventAccounts = () => ACCOUNTS.filter((a) => !a.freeBoxOnly);
 
 /* Buang akun kembar (user_id sama). Config pernah memuat akun yang sama dua kali:
  * efeknya satu akun "makan" satu slot tembakan, dan laporan hasil menampilkan
@@ -300,7 +308,7 @@ function printSchedule(list) {
   for (const a of shown) {
     const t = TYPE_NAME[a.type] || `type${a.type}`;
     const start = a.is_progress === 0 ? localTime(a.diff_time_start) : 'sedang jalan';
-    const elig = ACCOUNTS.map((ac) => {
+    const elig = eventAccounts().map((ac) => {
       // token mati = bukan "eligible" — dulu ditandai ✓ karena data user-nya kosong.
       if (!users.get(ac.key)) return `${ac.name}:!`;
       const why = ineligibleReason(a, spends.get(ac.key) ?? 0, users.get(ac.key));
@@ -308,7 +316,7 @@ function printSchedule(list) {
     }).join(' ');
     log(`  ${t.padEnd(8)} #${String(a.id).padEnd(4)} ${String(a.start_time).padEnd(11)} → ${start}  [${statusLabel(a)}] quota ${a.join_total}/${a.join_user_limit}  elig ${elig}`);
   }
-  const bad = ACCOUNTS.filter((ac) => !users.get(ac.key)).map((ac) => ac.name);
+  const bad = eventAccounts().filter((ac) => !users.get(ac.key)).map((ac) => ac.name);
   if (bad.length) log(`  (! = token tidak valid, akun tidak ikut: ${bad.join(', ')})`);
 }
 
@@ -551,7 +559,7 @@ async function reportResult(a) {
   const title = gotTotal > 0
     ? `💰 ${label}: ${gotCount} akun dapat Rp ${rupiah(gotTotal)}`
     : `📊 ${label}: belum ada yang dapat`;
-  const head = `${label} #${a.id} · ${a.start_time} (${dt === 0 ? 'hari ini' : 'kemarin'}) · peserta ${total}${quota ? `/${quota}` : ''} · ${joined}/${ACCOUNTS.length} akun masuk`;
+  const head = `${label} #${a.id} · ${a.start_time} (${dt === 0 ? 'hari ini' : 'kemarin'}) · peserta ${total}${quota ? `/${quota}` : ''} · ${joined}/${eventAccounts().length} akun masuk`;
   const tail = [
     gotTotal > 0 ? `💰 Total didapat: Rp ${rupiah(gotTotal)}` : '',
     Number.isFinite(bestPos) ? `Posisi terbaik kita: #${bestPos}/${total}` : '',
@@ -642,8 +650,8 @@ function wasAttempted(a) {
 }
 
 async function reportDailySchedule() {
-  // fetch jadwal semua akun paralel (sekaligus refresh spend per akun)
-  const results = await Promise.all(ACCOUNTS.map(async (acct) => {
+  // fetch jadwal semua akun event paralel (sekaligus refresh spend per akun)
+  const results = await Promise.all(eventAccounts().map(async (acct) => {
     try { return { acct, data: await loadSchedule(acct) }; }
     catch (e) { log(`⚠ [${acct.name}] error fetch list (jadwal harian): ${e?.message || e}`); return null; }
   }));
@@ -658,7 +666,7 @@ async function reportDailySchedule() {
   const lines = [`📅 Jadwal hari ini — ${new Date().toLocaleDateString('id-ID')}`];
   for (const a of list) {
     const syarat = a.type === 0 ? `LV${a.level_limit || 0}` : (a.limit_price ? `belanja ${a.limit_price}` : '');
-    const usable = ACCOUNTS.filter((acct) => users.get(acct.key));
+    const usable = eventAccounts().filter((acct) => users.get(acct.key));
     const elig = usable
       .filter((acct) => !ineligibleReason(a, spends.get(acct.key) ?? 0, users.get(acct.key)))
       .map((acct) => acct.name);
@@ -831,8 +839,8 @@ async function loopOnce(forceOverview = false) {
   const fetchTime = Date.now();
   let scheduleList = null;
 
-  // fetch jadwal SEMUA akun secara paralel — biar semua akun nembak di momen yang sama
-  const results = await Promise.all(ACCOUNTS.map(async (acct) => {
+  // fetch jadwal SEMUA akun event secara paralel — biar semua akun nembak di momen yang sama
+  const results = await Promise.all(eventAccounts().map(async (acct) => {
     try {
       return { acct, data: await loadSchedule(acct) };
     } catch (e) {
@@ -1067,8 +1075,10 @@ async function main() {
   }
 
   const targetLabel = CFG.targetType === 'all' ? 'semua type (angpao + free box)' : TYPE_LABEL[CFG.targetType] || CFG.targetType;
-  log(`🤖 Bot jalan (${ACCOUNTS.length} akun). Ctrl+C untuk berhenti. Target: ${targetLabel}`);
-  await ntfy('🤖 Boxkia: bot AKTIF', `Bot menyala — ${ACCOUNTS.length} akun (${ACCOUNTS.map((a) => a.name).join(', ')}). Target: ${targetLabel}.`);
+  const evAcc = eventAccounts();
+  const fbOnly = ACCOUNTS.filter((a) => a.freeBoxOnly).map((a) => a.name);
+  log(`🤖 Bot jalan (${evAcc.length} akun event${fbOnly.length ? ` + ${fbOnly.length} khusus free box: ${fbOnly.join(', ')}` : ''}). Ctrl+C untuk berhenti. Target: ${targetLabel}`);
+  await ntfy('🤖 Boxkia: bot AKTIF', `Bot menyala — ${evAcc.length} akun (${evAcc.map((a) => a.name).join(', ')})${fbOnly.length ? ` + free box: ${fbOnly.join(', ')}` : ''}. Target: ${targetLabel}.`);
   await reportBalances();
 
   let lastBeat = Date.now();

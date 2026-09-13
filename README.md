@@ -102,7 +102,8 @@ Hapus: `Unregister-ScheduledTask -TaskName 'BoxkiaSpWatch' -Confirm:$false`
 | `waitResultMs` | Setelah nembak, bot menunggu hasil undian muncul lalu mengirim laporan posisi + berapa yang didapat (default 180000 = 3 menit). Laporan dikirim **menang maupun tidak** — bisa dipicu manual dengan `node bot.mjs --hasil`. Kalau record hari itu belum ada, bot **menunggu dan mencoba lagi**, bukan memakai record hari lain |
 | `spCheckHours` | **Scanner SP otomatis** — kalau > 0 (mis. `1`), bot mengecek tiap X jam apakah ada barang yang SP-nya "jatuh tempo" (roll tanpa SP sudah melewati rata-rata) dan kirim notif `🔥` ke ntfy. Default `0` = mati |
 | `dailyScheduleHour` | Jam (0–23) kirim **ringkasan jadwal hari ini** (`📅`) ke ntfy — daftar event + akun mana yang memenuhi syarat (elig). Default `0` = tengah malam. Bisa kirim manual kapan saja dengan `node bot.mjs --jadwal` |
-| `freeBoxCheckMin` | Menit antar cek **Daily Free Blind Box** (3 akun target) dari laptop ini — default `15`, `0` = matikan. Bot sudah hidup terus, jadi box-nya tetap terambil walau GitHub Actions sedang outage. Script-nya idempoten (hanya draw kalau statusnya benar-benar siap), jadi aman jalan dobel bareng cloud |
+| `freeBoxTargets` | Daftar nama akun yang ikut **Daily Free Blind Box** (harus ada di `accounts`). Default: `West said, Femzy, Boxkia 27895, syawarman` |
+| `freeBoxCheckMin` | Menit antar cek **Daily Free Blind Box** (akun target) dari laptop ini — default `15`, `0` = matikan. Bot sudah hidup terus, jadi box-nya tetap terambil walau GitHub Actions sedang outage. Script-nya idempoten (hanya draw kalau statusnya benar-benar siap), jadi aman jalan dobel bareng cloud |
 
 Kalau sudah sering "kehabisan", naikkan `joinConcurrency` ke `3` dan kecilkan
 `retryIntervalMs` ke `80`. Jangan terlalu agresif — kalau ketahuan membanjiri
@@ -181,6 +182,24 @@ akun secara paralel saat event mulai. Log ditandai nama akun (`[akun1]`).
 
 > ⚠ Semakin banyak akun = semakin banyak request. 3–4 akun masih wajar;
 > jangan berlebihan biar akun tidak kena batasan dari server.
+
+### Akun khusus Daily Free Blind Box
+
+Tambahkan `"freeBoxOnly": true` pada entri akun kalau akun itu **hanya** mau
+ikut *Daily Free Blind Box* — bukan event angpao/free-box treasure hunt (berguna
+buat akun yang levelnya masih kecil sehingga hampir semua event kena syarat level):
+
+```json
+"freeBoxTargets": ["West said", "Femzy", "Boxkia 27895", "syawarman"],
+"accounts": [
+  { "name": "syawarman", "token": "TOKEN", "visitorId": "boxkia-bot-10", "freeBoxOnly": true }
+]
+```
+
+Akun seperti ini tetap login (jadi ketahuan kalau tokennya mati), tapi
+**dikecualikan** dari daftar eligibility event dan tidak pernah ikut menembak
+join angpao/free-box event — dia cuma muncul di jalur `freebox-draw.mjs`
+(`node freebox-draw.mjs --check` untuk lihat statusnya).
 
 ## Scanner SP (`--sp`)
 
