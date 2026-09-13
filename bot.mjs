@@ -525,7 +525,9 @@ async function reportResult(a) {
   const endsIn = Number(a.diff_time_end);
   const ended = Number.isFinite(endsIn) && endsIn <= 0;
   let gotTotal = 0, gotCount = 0, joined = 0, bestPos = Infinity;
-  const rows = ACCOUNTS.map((acct) => {
+  // Hanya akun event: akun free-box-only tidak pernah ikut event treasure hunt,
+  // jadi kalau ikut didaftarkan di sini dia cuma muncul sebagai "kalah cepat" palsu.
+  const rows = eventAccounts().map((acct) => {
     const u = users.get(acct.key);
     if (!u) return `• ${acct.name} — token mati`;
     const rec = all.find((x) => String(x.user_id) === String(u.user_id));
