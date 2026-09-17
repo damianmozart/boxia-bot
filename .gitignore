@@ -9,5 +9,8 @@ reported-events.json
 attempted-events.json
 .cache/
 
+# Dependency tools/ (sengaja dipisah dari root yang zero-dependency)
+node_modules/
+
 # Artifact migrasi
 boxkia-bot-migrasi.zip

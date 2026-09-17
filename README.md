@@ -185,14 +185,17 @@ akun secara paralel saat event mulai. Log ditandai nama akun (`[akun1]`).
 
 ### Akun khusus Daily Free Blind Box
 
-Tambahkan `"freeBoxOnly": true` pada entri akun kalau akun itu **hanya** mau
-ikut *Daily Free Blind Box* — bukan event angpao/free-box treasure hunt (berguna
-buat akun yang levelnya masih kecil sehingga hampir semua event kena syarat level):
+`freeBoxTargets` menentukan siapa saja yang ikut *Daily Free Blind Box*
+(sekarang: `West said`, `Femzy`, `Boxkia 27895`, `syawarman`).
+
+Kalau ada akun yang **hanya** mau ikut *Daily Free Blind Box* — tidak ikut event
+angpao/free-box treasure hunt — tambahkan `"freeBoxOnly": true` pada entri
+akun itu:
 
 ```json
 "freeBoxTargets": ["West said", "Femzy", "Boxkia 27895", "syawarman"],
 "accounts": [
-  { "name": "syawarman", "token": "TOKEN", "visitorId": "boxkia-bot-10", "freeBoxOnly": true }
+  { "name": "akun-baruy", "token": "TOKEN", "visitorId": "boxkia-bot-11", "freeBoxOnly": true }
 ]
 ```
 
@@ -200,6 +203,27 @@ Akun seperti ini tetap login (jadi ketahuan kalau tokennya mati), tapi
 **dikecualikan** dari daftar eligibility event dan tidak pernah ikut menembak
 join angpao/free-box event — dia cuma muncul di jalur `freebox-draw.mjs`
 (`node freebox-draw.mjs --check` untuk lihat statusnya).
+
+> `syawarman` (LV3) awalnya pakai flag ini, sekarang **dilepas** supaya dia ikut
+> juga di event angpao/free-box — dia tetap terdaftar di `freeBoxTargets`, jadi
+> dua-duanya kebagian.
+
+### Sinkron config ke cloud (Secret GitHub)
+
+`config.json` tidak di-commit (isinya token) dan repo ini publik, jadi GitHub
+Actions mengambil config dari Secret `BOXKIA_CONFIG`. Kalau Secret-nya
+ketinggalan, cloud jalan dengan daftar akun lama. Setelah mengubah `accounts`
+atau `freeBoxTargets`, dorong perubahannya:
+
+```bash
+cd tools && npm install     # sekali saja (dependency libsodium)
+node sync-cloud-config.mjs  # dari folder tools
+```
+
+Verifikasinya cuma lihat run Actions berikutnya: log-nya menyebut jumlah akun yang
+login dan jumlah target Daily Free Box. (Kejadian nyata: akun `syawarman` sudah
+aktif di laptop tapi cloud masih jalan dengan 3 akun free box karena Secret-nya
+belum diperbarui.)
 
 ## Scanner SP (`--sp`)
 

@@ -171,6 +171,13 @@ server.listen(PORT, '127.0.0.1', async () => {
   const angReport = blockOf('angpao #999 · MOCK');
   const freeReport = blockOf('free-box #1001 · MOCK');
 
+  // Total angpao = jumlah akun × Rp 4.500 (tiap peserta mock dapat 4500).
+  // Jumlah akunnya TIDAK di-hardcode: mock-nya mengikuti config.json, jadi
+  // begitu ada akun baru (mis. syawarman) angka 9/40.500 jadi usang.
+  const angSum = out.match(/💰 angpao: (\d+) akun dapat Rp ([\d.,]+)/);
+  const angCount = angSum ? Number(angSum[1]) : 0;
+  const angTotal = angSum ? Number(angSum[2].replace(/\./g, '').replace(',', '.')) : NaN;
+
   const checks = [
     ['event di-arm', /🛡 arm angpao #999/.test(out)],
     ['tidur presisi (bukan fast-poll)', /💤 tidur presisi/.test(out)],
@@ -191,7 +198,7 @@ server.listen(PORT, '127.0.0.1', async () => {
     ['laporan menyebut berapa yang DIDAPAT', /dapat Rp \d/.test(out)],
     ['laporan menghitung total kemenangan', /Total didapat|Posisi terbaik/.test(out)],
     // angpao: bagian yang didapat SEMUA peserta harus dihitung, bukan cuma is_win
-    ['angpao menghitung bagian semua peserta', /💰 angpao: 9 akun dapat Rp 40\.500,00/.test(out)],
+    ['angpao menghitung bagian semua peserta', angCount >= 9 && angTotal === angCount * 4500],
     ['angpao: tiap akun dapat bagian (bukan Rp 0)', /dapat Rp 4\.500,00/.test(angReport) && !/dapat Rp 0,00/.test(angReport)],
     ['free-box: yang bukan pemenang tetap Rp 0', /dapat Rp 0,00/.test(freeReport)],
   ];

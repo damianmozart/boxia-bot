@@ -1,0 +1,9 @@
+{
+  "name": "boxkia-tools",
+  "private": true,
+  "type": "module",
+  "description": "Utilitas pendukung (bukan bagian bot) — butuh dependency, jadi dipisah dari root yang sengaja zero-dependency.",
+  "dependencies": {
+    "libsodium-wrappers": "^0.7.15"
+  }
+}
