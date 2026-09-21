@@ -61,6 +61,11 @@ const CFG = {
   actionsBudgetMs: 600000,     // mode Actions: berapa lama satu run boleh bertahan (ms)
   waitResultMs: 180000,        // seberapa lama menunggu hasil undian muncul setelah nembak (ms)
   apiTimeoutMs: 15000,         // timeout tiap request API — cegah fetch macet membekukan bot
+  // Polling jadwal jalan terus-menerus, jadi request yang nyangkut harus cepat
+  // dilepas: server Boxkia sesekali menahan satu koneksi sampai timeout (terukur:
+  // 9 request paralel = kadang menggantung ~15s). Kalau ikut menunggu 15s,
+  // jendela ARM (20s) bisa nyaris habis sebelum bot sempat menentukan tembakan.
+  scheduleTimeoutMs: 6000,
   ntfyTopic: '',
   ...JSON.parse(readFileSync(path.join(__dirname, 'config.json'), 'utf8')),
 };
@@ -75,6 +80,7 @@ for (const [key, env] of Object.entries({
   pollIntervalMs: 'BOXKIA_POLL_MS',
   joinConcurrency: 'BOXKIA_JOIN_CONCURRENCY',
   freeBoxCheckMin: 'BOXKIA_FREEBOX_CHECK_MIN',
+  scheduleTimeoutMs: 'BOXKIA_SCHEDULE_TIMEOUT_MS',
 })) {
   if (process.env[env]) CFG[key] = Number(process.env[env]);
 }
@@ -187,7 +193,7 @@ const attemptedPrev = new Set();
 const LOG_MAX_BYTES = Number(process.env.BOXKIA_LOG_MAX_BYTES || 8 * 1024 * 1024);
 let logLines = 0;
 function rotateLogIfNeeded() {
-  if (++logLines % 200 !== 0) return;   // cek ukuran tiap 200 baris, bukan tiap baris
+  if (++logLines % 50 !== 0) return;    // cek ukuran tiap 50 baris, bukan tiap baris
   try {
     if (existsSync(LOG_FILE) && statSync(LOG_FILE).size > LOG_MAX_BYTES) {
       renameSync(LOG_FILE, LOG_FILE + '.1');
@@ -301,9 +307,9 @@ async function fetchUserInfo(acct) {
   return r.code === 0 ? r.data : null;
 }
 
-async function loadSchedule(acct) {
+async function loadSchedule(acct, timeoutMs) {
   const t0 = Date.now();
-  const r = await api('/activity/luckyBag/list', { account: acct });
+  const r = await api('/activity/luckyBag/list', { account: acct, timeoutMs: timeoutMs ?? CFG.scheduleTimeoutMs });
   const rtt = Date.now() - t0;
   LAST_RTT_MS = LAST_RTT_MS ? Math.round(LAST_RTT_MS * 0.6 + rtt * 0.4) : rtt;
   if (r.code !== 0) throw new Error(`list gagal: code=${r.code} msg=${r.msg}`);
@@ -1200,6 +1206,11 @@ async function bye(reason) {
 process.on('SIGINT', () => bye('Ctrl+C'));
 process.on('SIGTERM', () => bye('SIGTERM'));
 process.on('unhandledRejection', (e) => log('⚠ unhandledRejection:', e?.message || e));
+// Bot lokal pernah mati tanpa satu baris pun di log (bukan FATAL, bukan Ctrl+C):
+// satu exception di luar promise chaining sudah cukup mematikan proses Node.
+// Karena bot ini bergantung pada proses yang hidup terus, exception tak terduga
+// dicatat lalu proses dibiarkan jalan — lebih baik tetap polling daripada mati diam.
+process.on('uncaughtException', (e) => log('⚠ uncaughtException:', e?.stack || e?.message || e));
 main().catch(async (e) => {
   log('FATAL:', e);
   await ntfy('⛔ Boxkia: bot MATI', `Error fatal: ${e?.message || e}`);
