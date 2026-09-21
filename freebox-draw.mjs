@@ -32,7 +32,12 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CFG = JSON.parse(readFileSync(path.join(__dirname, 'config.json'), 'utf8'));
-const BASE = 'https://api.boxkia.com/api/v3';
+// Override lewat env dipakai buat tes lawan API tiruan (sama seperti bot.mjs
+// punya BOXKIA_API_BASE) — tanpa ini perilaku "jangan spam notif" nggak bisa
+// diverifikasi otomatis.
+const BASE = (process.env.BOXKIA_FREEBOX_API_BASE || 'https://api.boxkia.com/api/v3').replace(/\/$/, '');
+const NTFY_TOPIC = process.env.BOXKIA_NTFY_TOPIC || CFG.ntfyTopic;
+const NTFY_URL = process.env.BOXKIA_NTFY_URL || 'https://ntfy.sh/';
 const BOX_ID = Number(process.env.FREEBOX_ID || CFG.freeBoxId || 67122);
 const TARGETS = CFG.freeBoxTargets || ['West said', 'Femzy', 'Boxkia 27895', 'syawarman'];
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36';
@@ -50,12 +55,12 @@ function log(...parts) {
 }
 
 async function ntfy(title, msg) {
-  if (!CFG.ntfyTopic) return;
+  if (!NTFY_TOPIC) return;
   try {
-    const res = await fetch('https://ntfy.sh/', {
+    const res = await fetch(NTFY_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ topic: CFG.ntfyTopic, title, message: msg }),
+      body: JSON.stringify({ topic: NTFY_TOPIC, title, message: msg }),
       signal: AbortSignal.timeout(10000),
     });
     if (!res.ok) log(`⚠ ntfy gagal: HTTP ${res.status}`);
@@ -152,7 +157,20 @@ async function main() {
   // Notif HANYA kalau ada sesuatu yang benar-benar terjadi (atau diminta paksa).
   // Cron jalan tiap jam; kalau tiap run kirim notif, HP bakal spam 24x sehari.
   // `--check` itu alat diagnostik — cukup tampil di terminal, jangan ping HP.
-  const worthNotifying = NOTIFY_ALL || won.length > 0 || errors.length > 0;
+  //
+  // Error jaringan sesaat (timeout / fetch failed) TIDAK boleh memicu notif pada
+  // tiap run: server Boxkia memang kadang menahan satu koneksi, dan cron kami
+  // jalan tiap 5 menit — hasilnya HP kebanjiran "⚠️ Free Box: N error" padahal
+  // cuma hiccup sesaat. Yang tetap dinotifikasi: kemenangan, box siap draw,
+  // error yang BUKAN jaringan (mis. token mati / code dari server), dan kondisi
+  // saat SEMUA target gagal sekaligus (itu baru masalah nyata).
+  const TRANSIENT = /fetch failed|aborted|timeout|socket|ECONN|EAI_AGAIN|terminated|network/i;
+  const hardErrors = errors.filter((e) => !TRANSIENT.test(String(e.msg || '')));
+  const allFailed = errors.length > 0 && errors.length === results.length;
+  const worthNotifying = NOTIFY_ALL || won.length > 0 || ready.length > 0 || hardErrors.length > 0 || allFailed;
+  if (errors.length && !worthNotifying) {
+    log(`  (${errors.length} error jaringan sesaat — notif dilewati biar HP nggak spam)`);
+  }
   const head = won.length
     ? `🎁 Free Box: ${won.length} MENANG!`
     : ready.length

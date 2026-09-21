@@ -4,6 +4,7 @@ config.json
 
 # Log & state runtime (dibuat bot saat jalan — jangan pernah di-commit)
 *.log
+*.log.*
 *-state.json
 reported-events.json
 attempted-events.json
