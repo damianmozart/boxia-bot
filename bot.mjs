@@ -33,7 +33,7 @@
  *   dailyScheduleHour — jam (0-23) kirim ringkasan jadwal harian ke ntfy sekali sehari (0 = tengah malam)
  */
 
-import { readFileSync, appendFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { readFileSync, appendFileSync, writeFileSync, mkdirSync, existsSync, statSync, renameSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -182,10 +182,23 @@ const attemptedPrev = new Set();
 
 /* ---------------- util ---------------- */
 
+// Log rotasi: file log pernah membengkak sampai 20 MB dan bikin grep lambat.
+// Begitu lewat LOG_MAX_BYTES, file lama di-rename jadi .1 dan mulai file baru.
+const LOG_MAX_BYTES = Number(process.env.BOXKIA_LOG_MAX_BYTES || 8 * 1024 * 1024);
+let logLines = 0;
+function rotateLogIfNeeded() {
+  if (++logLines % 200 !== 0) return;   // cek ukuran tiap 200 baris, bukan tiap baris
+  try {
+    if (existsSync(LOG_FILE) && statSync(LOG_FILE).size > LOG_MAX_BYTES) {
+      renameSync(LOG_FILE, LOG_FILE + '.1');
+    }
+  } catch { /* abaikan — log bukan hal kritis */ }
+}
+
 function log(...parts) {
   const line = `[${new Date().toLocaleString('id-ID')}] ${parts.join(' ')}`;
   console.log(line);
-  try { appendFileSync(LOG_FILE, line + '\n'); } catch { /* abaikan */ }
+  try { appendFileSync(LOG_FILE, line + '\n'); rotateLogIfNeeded(); } catch { /* abaikan */ }
 }
 
 async function ntfy(title, msg) {
@@ -838,6 +851,7 @@ async function fireArmed() {
 }
 
 async function loopOnce(forceOverview = false) {
+  rollStateDayIfNeeded();
   const fetchTime = Date.now();
   let scheduleList = null;
 
@@ -866,7 +880,17 @@ async function loopOnce(forceOverview = false) {
     for (const a of list) {
       if (!targetMatch(a) || a.is_progress === 2) continue;
       if (a.is_join == 1 || joined.get(acct.key)?.has(a.id)) { attempted.get(acct.key).add(a.id); attemptedAny.add(a.id); continue; }
-      if (attempted.get(acct.key).has(a.id) || armed.get(a.id)?.accts.includes(acct)) continue;
+      if (attempted.get(acct.key).has(a.id)) {
+        // Sebelumnya ini `continue` senyap — bot lokal yang hidup >1 hari jadi
+        // "mati diam-diam" tanpa jejak. Sekarang sekali per event, jelaskan.
+        const sk = `${acct.key}:${a.id}:attempted`;
+        if (skipLogged.get(sk) !== 'attempted') {
+          skipLogged.set(sk, 'attempted');
+          log(`  ⏭ [${acct.name}] #${a.id} (${a.start_time}, ${TYPE_NAME[a.type]}) sudah pernah ditembak hari ini/sesi ini — dilewati`);
+        }
+        continue;
+      }
+      if (armed.get(a.id)?.accts.includes(acct)) continue;
       const why = ineligibleReason(a, spends.get(acct.key), users.get(acct.key));
       if (why) {
         // JANGAN tandai attempted — kalau nanti akun jadi eligible (mis. habis belanja),
@@ -931,6 +955,35 @@ async function loopOnce(forceOverview = false) {
   return { armedCount: armed.size, nextFire: nextFireAt(), soonestStartsIn, hasTarget: targets.size > 0 };
 }
 
+/* ---------------- reset harian state "sudah ditembak" ----------------
+ * ID event Boxkia DIPAKAI ULANG tiap hari (angpao #244 ada lagi besoknya).
+ * `attempted`/`joined`/`attemptedAny` dulu hanya diisi sekali di awal proses dan
+ * TIDAK pernah dibersihkan — akibatnya proses yang hidup lebih dari sehari
+ * (bot lokal) diam-diam melewati SEMUA event yang id-nya sudah pernah ditembak
+ * hari sebelumnya, tanpa satu baris log pun. Ini yang bikin bot lokal berhenti
+ * menembak sejak 20/9 padahal jadwal menampilkan semua akun eligible. */
+let stateDay = process.env.BOXKIA_STATE_DAY || new Date().toLocaleDateString('id-ID');
+// Hook test: paksa "pergantian hari" tiap N ms. Dipakai test-arm-fire buat
+// membuktikan state di atas benar-benar di-reset — bug ini cuma muncul pada
+// proses yang hidup lintas hari, jadi tanpa hook nggak bisa diregresi-tes.
+const FORCE_ROLL_MS = Number(process.env.BOXKIA_FORCE_DAY_ROLL_MS || 0);
+let lastRollAt = Date.now();
+function rollStateDayIfNeeded() {
+  if (FORCE_ROLL_MS > 0 && Date.now() - lastRollAt >= FORCE_ROLL_MS) {
+    lastRollAt = Date.now();
+    stateDay = `paksa-${stateDay}`;   // paksa dianggap beda hari → reset jalan
+  }
+  const today = new Date().toLocaleDateString('id-ID');
+  if (today === stateDay) return false;
+  stateDay = today;
+  for (const s of attempted.values()) s.clear();
+  for (const s of joined.values()) s.clear();
+  attemptedAny.clear();
+  skipLogged.clear();
+  log(`🔄 Ganti hari (${today}) — status "sudah ditembak" di-reset (id event dipakai ulang tiap hari).`);
+  return true;
+}
+
 /* ---------------- mode GitHub Actions (single-shot) ---------------- */
 // Di GitHub Actions bot nggak bisa loop terus (job max 6 jam, cron min 5 menit).
 // Mode ini: job cron tiap 5 menit -> kalau ada event target mulai <= 6 menit lagi,
@@ -966,6 +1019,7 @@ async function actionsMode() {
   log(`🕒 sesi Actions — budget ${Math.round(budgetMs / 1000)}s`);
 
   for (;;) {
+    rollStateDayIfNeeded();
     // ada event yang sudah di-arm → tidur presisi sampai waktu tembak (tanpa polling jadwal)
     const nf = nextFireAt();
     if (Number.isFinite(nf)) {

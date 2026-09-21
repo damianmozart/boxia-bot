@@ -291,3 +291,17 @@ ke-restart, dia tidak notif ulang barang yang sudah pernah dilaporkan
 - **Syarat & ketentuan:** memakai bot untuk event seperti ini berpotensi
   melanggar ToS / aturan "keadilan" Boxkia, dan risiko akun dibatasi adalah
   milikmu. Pakai sewajarnya (bukan banjir ribuan request per detik).
+
+## Tes
+
+```bash
+node test-arm-fire.mjs     # penjadwal ARM→FIRE + laporan hasil (21 check, pakai mock API)
+node test-day-roll.mjs     # reset state "sudah ditembak" saat ganti hari (5 check)
+```
+
+Id event Boxkia **dipakai ulang tiap hari** (angpao #244 muncul lagi besoknya).
+Bot perlu membersihkan catatan "sudah ditembak" saat melewati tengah malam;
+kalau tidak, proses yang hidup lebih dari sehari akan melewati semua event
+yang id-nya sudah pernah ditembak — tanpa log. `test-day-roll.mjs` menjaga ini:
+running pertama sengaja tanpa hook pergantian hari dan **harus** cuma menembak
+sekali, running kedua dengan pergantian hari dipaksa dan **harus** menembak lagi.
