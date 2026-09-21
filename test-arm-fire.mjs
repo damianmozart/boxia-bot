@@ -9,7 +9,7 @@
 //       (b) join pertama mendarat dekat T0
 import http from 'node:http';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -60,6 +60,9 @@ function schedule() {
 
 const notifs = [];       // {title, message} yang ditangkap mock ntfy
 let allDup = false;      // mode "semua akun sudah ikut" buat menguji judul notif
+// token yang /user/info-nya dibikin gagal beberapa kali (meniru rate-limit sesaat),
+// plus sisa berapa kali harus gagal.
+const loginFail = new Map();
 const bucketByToken = new Map();
 const userByToken = new Map();
 function joinResult(token, id) {
@@ -124,6 +127,12 @@ const server = http.createServer((req, res) => {
       if (!bucketByToken.has(tok)) {
         bucketByToken.set(tok, bucketByToken.size % 3);
         userByToken.set(tok, 1000 + userByToken.size);
+      }
+      // gagal login sesaat (10003) — token VALID, cuma kena rate-limit
+      const left = loginFail.get(tok) || 0;
+      if (left > 0) {
+        loginFail.set(tok, left - 1);
+        return res.writeHead(200, JSON_H).end(JSON.stringify({ code: 10003, msg: 'Login required' }));
       }
       const i = [...bucketByToken.keys()].indexOf(tok);
       return res.writeHead(200, JSON_H).end(JSON.stringify({
@@ -207,7 +216,23 @@ server.listen(PORT, '127.0.0.1', async () => {
   const title2 = notifs.slice(notifsBefore).map((n) => String(n.title || ''))[0] || '';
   console.log(`\n=== run 2 (semua akun sudah ikut) → judul notif: "${title2}" ===`);
 
+  // --- run 3: satu akun gagal login 3x (rate-limit sesaat) tapi tokennya sehat.
+  // Dulu laporan menyebutnya "token mati" dan jumlah "akun masuk" jadi kurang.
+  const dir3 = mkdtempSync(path.join(tmpdir(), 'boxkia-arm3-'));
+  const tokens = (JSON.parse(readFileSync(path.join(import.meta.dirname, 'config.json'), 'utf8')).accounts || [])
+    .filter((x) => x.token).map((x) => x.token);
+  loginFail.set(tokens[1], 3);
+  const out3 = (await run({ args: ['--hasil', '999'], dataDir: dir3 })).out;
+  loginFail.clear();
+  try { rmSync(dir3, { recursive: true, force: true }); } catch { /* abaikan */ }
+  const masuk3 = (out3.match(/· (\d+)\/(\d+) akun masuk/) || [])[0] || '(tidak ada laporan)';
+  console.log(`\n=== run 3 (1 akun gagal login sesaat) → ${masuk3} ===`);
+  console.log(out3.split('\n').filter((l) => /login ulang|tidak login|akun masuk|🔁/.test(l)).join('\n'));
+
   const checks = [
+    ['login gagal sesaat → login ulang sebelum laporan', /login ulang berhasil sebelum laporan/.test(out3)],
+    ['laporan menghitung SEMUA akun (bukan kurang)', /· (\d+)\/\1 akun masuk/.test(masuk3)],
+    ['akun sehat tidak lagi dilabeli "token mati"', !/token mati/.test(out3)],
     ['notif "ikut berhasil" saat ada akun yang berhasil join', notifs.some((n) => String(n.title || '').includes('ikut berhasil'))],
     ['semua sudah ikut → judul "semua sudah ikut"', /semua sudah ikut/.test(title2)],
     ['nol kegagalan → TIDAK bilang "ada yang gagal"', !/ada yang gagal/.test(title2)],

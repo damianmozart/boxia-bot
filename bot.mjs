@@ -540,9 +540,28 @@ async function fetchRecords(id, dateType) {
  *     menandai bagian terbesar. Jadi "dapat Rp 0" untuk peserta angpao itu SALAH.
  *   - free-box (type 0): hadiah jatuh ke satu pemenang → yang lain `amount` 0.
  * Karena itu "didapat" dihitung dari `amount`, bukan dari `is_win`. */
+/* Akun yang GAGAL LOGIN di awal sesi (biasanya cuma kena rate-limit sesaat, bukan
+ * token mati) bikin laporan menghitungnya sebagai "token mati" dan jumlah
+ * "akun masuk" jadi kurang dari kenyataan. Kejadian nyata: cloud melapor
+ * "7/9 akun masuk" untuk angpao #244 padahal 9/9 akun dapat bagian — dua akun
+ * dilabeli "token mati" padahal tokennya sehat dan ikut lewat runner lain.
+ * Sebelum melapor, akun yang belum punya data user dicoba login sekali lagi. */
+async function lateLoginMissing() {
+  for (const acct of eventAccounts()) {
+    if (users.get(acct.key)) continue;
+    const u = await fetchUserInfo(acct).catch(() => null);
+    if (u) {
+      users.set(acct.key, u);
+      acct.name = u.nickname || acct.name;
+      log(`🔁 [${acct.name}] login ulang berhasil sebelum laporan (tadi gagal) — akun ini tetap dihitung`);
+    }
+  }
+}
+
 async function reportResult(a) {
   const dt = dateTypeOf(a);
   if (dt == null) return true;                       // lebih tua dari kemarin — di luar jangkauan record
+  await lateLoginMissing();
   const all = await fetchRecords(a.id, dt);
   if (!all.length) return false;                     // hari itu belum ada record → coba lagi, jangan pakai hari lain
   reported.add(reportKey(a));
@@ -557,7 +576,7 @@ async function reportResult(a) {
   // jadi kalau ikut didaftarkan di sini dia cuma muncul sebagai "kalah cepat" palsu.
   const rows = eventAccounts().map((acct) => {
     const u = users.get(acct.key);
-    if (!u) return `• ${acct.name} — token mati`;
+    if (!u) return `• ${acct.name} — tidak login (token ditolak / gagal jaringan)`;
     const rec = all.find((x) => String(x.user_id) === String(u.user_id));
     if (!rec) {
       const why = skipReason(a, acct);
