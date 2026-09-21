@@ -295,8 +295,9 @@ ke-restart, dia tidak notif ulang barang yang sudah pernah dilaporkan
 ## Tes
 
 ```bash
-node test-arm-fire.mjs     # penjadwal ARM→FIRE + laporan hasil (21 check, pakai mock API)
-node test-day-roll.mjs     # reset state "sudah ditembak" saat ganti hari (5 check)
+node test-arm-fire.mjs        # penjadwal ARM→FIRE + laporan hasil + judul notif (24 check)
+node test-day-roll.mjs        # reset state "sudah ditembak" saat ganti hari (5 check)
+node test-freebox-notify.mjs  # kebijakan notif free box (anti-spam & anti-alarm palsu) (6 check)
 ```
 
 Id event Boxkia **dipakai ulang tiap hari** (angpao #244 muncul lagi besoknya).
