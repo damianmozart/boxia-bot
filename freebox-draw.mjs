@@ -86,9 +86,27 @@ async function api(url, acct, method = 'GET', body = null) {
   return r.json();
 }
 
-const getStatus = (acct) =>
-  api(`${BASE}/home/extraIntegral/freeBlindBox/detail?blind_box_id=${BOX_ID}`, acct)
-    .then((d) => d.data?.free_blind_box_info || null);
+// Ambil status dengan satu kali retry. Server Boxkia sesekali menahan koneksi
+// sampai timeout; kalau langsung menyerah, akun itu DILEWATI (padahal box-nya
+// mungkin sudah siap) dan notifnya berbunyi seperti masalah nyata — padahal
+// cuma hiccup. Retry bikin draw-nya lebih jarang kelewat sekaligus menekan
+// alarm palsu. Retry hanya untuk status (GET), bukan submit (bisa dobel draw).
+async function getStatus(acct) {
+  let lastErr = null;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const d = await api(`${BASE}/home/extraIntegral/freeBlindBox/detail?blind_box_id=${BOX_ID}`, acct);
+      const info = d.data?.free_blind_box_info || null;
+      if (info) return info;
+      lastErr = null;   // server menjawab, tapi memang belum ada info box
+    } catch (e) {
+      lastErr = e;
+    }
+    if (attempt === 1) await new Promise((r) => setTimeout(r, 1500));
+  }
+  if (lastErr) throw lastErr;
+  return null;
+}
 
 const draw = (acct) =>
   api(`${BASE}/home/extraIntegral/freeBlindBox/submit`, acct, 'POST', { blind_box_id: BOX_ID });

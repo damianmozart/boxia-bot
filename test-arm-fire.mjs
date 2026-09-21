@@ -58,9 +58,12 @@ function schedule() {
   };
 }
 
+const notifs = [];       // {title, message} yang ditangkap mock ntfy
+let allDup = false;      // mode "semua akun sudah ikut" buat menguji judul notif
 const bucketByToken = new Map();
 const userByToken = new Map();
 function joinResult(token, id) {
+  if (allDup) return { code: 1, msg: 'Duplicate participation not allowed' };
   if (Date.now() < T0) return { code: 1, msg: 'not started yet' };
   if (id === 1001) return { code: 0, msg: 'ok', data: {} }; // free box: selalu sukses
   const bucket = bucketByToken.get(token) ?? 2;
@@ -71,6 +74,16 @@ function joinResult(token, id) {
 
 const server = http.createServer((req, res) => {
   let body = '';
+  // POST ke root = notifikasi (mock ntfy lokal), supaya judul notif bisa diuji
+  // tanpa mengirim apa pun ke HP.
+  if (req.method === 'POST' && (req.url === '/' || req.url === '')) {
+    req.on('data', (c) => { body += c; });
+    req.on('end', () => {
+      try { notifs.push(JSON.parse(body)); } catch { notifs.push({ title: body }); }
+      res.writeHead(200, JSON_H).end('{}');
+    });
+    return;
+  }
   req.on('data', (c) => { body += c; });
   req.on('end', () => {
     const url = req.url || '';
@@ -122,18 +135,23 @@ const server = http.createServer((req, res) => {
   });
 });
 
-function run() {
+function run(opts = {}) {
   return new Promise((resolve) => {
-    const p = spawn(process.execPath, ['bot.mjs', '--actions'], {
+    // tiap run dapat DATA_DIR sendiri: kalau dipakai bersama, run kedua langsung
+    // "sudah dilaporkan" dari state run pertama dan laporannya nggak pernah dikirim.
+    const dir = opts.dataDir || DATA_DIR;
+    const p = spawn(process.execPath, ['bot.mjs', ...(opts.args || ['--actions'])], {
       cwd: import.meta.dirname,
       env: {
         ...process.env,
         BOXKIA_API_BASE: `http://127.0.0.1:${PORT}`,
-        BOXKIA_NTFY_TOPIC: '',
-        DATA_DIR,
+        BOXKIA_NTFY_TOPIC: 'uji',
+        BOXKIA_NTFY_URL: `http://127.0.0.1:${PORT}/`,
+        DATA_DIR: dir,
         ACTIONS_BUDGET_MS: '60000',
         BOXKIA_FREEBOX_DELAY_MS: String(FREEBOX_DELAY_MS),
         BOXKIA_FREEBOX_JITTER_MS: '0',
+        ...(opts.env || {}),
       },
     });
     let out = '';
@@ -178,7 +196,21 @@ server.listen(PORT, '127.0.0.1', async () => {
   const angCount = angSum ? Number(angSum[1]) : 0;
   const angTotal = angSum ? Number(angSum[2].replace(/\./g, '').replace(',', '.')) : NaN;
 
+  // --- run 2: semua akun balas "Duplicate participation" (artinya sudah ikut lewat
+  // runner lain, mis. cloud). Dulu ini mengirim notif "⚠️ ada yang gagal" padahal
+  // tidak ada satu pun yang gagal — bikin panik tanpa sebab.
+  const notifsBefore = notifs.length;
+  allDup = true;
+  const dir2 = mkdtempSync(path.join(tmpdir(), 'boxkia-arm2-'));
+  await run({ args: ['--once'], dataDir: dir2 });
+  try { rmSync(dir2, { recursive: true, force: true }); } catch { /* abaikan */ }
+  const title2 = notifs.slice(notifsBefore).map((n) => String(n.title || ''))[0] || '';
+  console.log(`\n=== run 2 (semua akun sudah ikut) → judul notif: "${title2}" ===`);
+
   const checks = [
+    ['notif "ikut berhasil" saat ada akun yang berhasil join', notifs.some((n) => String(n.title || '').includes('ikut berhasil'))],
+    ['semua sudah ikut → judul "semua sudah ikut"', /semua sudah ikut/.test(title2)],
+    ['nol kegagalan → TIDAK bilang "ada yang gagal"', !/ada yang gagal/.test(title2)],
     ['event di-arm', /🛡 arm angpao #999/.test(out)],
     ['tidur presisi (bukan fast-poll)', /💤 tidur presisi/.test(out)],
     ['akun nembak join', /⚡ angpao #999/.test(out)],

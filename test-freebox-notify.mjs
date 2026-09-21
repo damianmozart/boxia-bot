@@ -23,8 +23,9 @@ import path from 'node:path';
 const PORT = 8096;
 const TOPIC = `boxkia-test-${Math.random().toString(36).slice(2, 10)}`;
 const TARGETS = ['West said', 'Femzy', 'Boxkia 27895', 'syawarman'];
-// mode global untuk mock: 'all-fail' | 'mostly-ok'
+// mode global untuk mock: 'all-fail' | 'mostly-ok' | 'flaky-once'
 let mode = 'mostly-ok';
+const seenOnce = new Set();   // token yang sudah pernah gagal sekali (mode flaky)
 
 const notifs = [];   // pesan yang benar-benar dikirim (ditangkap mock ntfy lokal)
 
@@ -53,7 +54,10 @@ const server = http.createServer((req, res) => {
   req.on('end', () => {
     if (!acct) return res.writeHead(200, JSON_H).end(JSON.stringify({ code: 0, data: { free_blind_box_info: null } }));
     // gagal jaringan: putuskan koneksi tanpa balasan (mirip timeout/fetch failed)
-    if (mode === 'all-fail' || !acct.ok) { req.socket.destroy(); return; }
+    if (mode === 'all-fail' || (mode === 'mostly-ok' && !acct.ok)) { req.socket.destroy(); return; }
+    // flaky: request PERTAMA tiap akun diputus, berikutnya normal — meniru
+    // hiccup sesaat yang seharusnya selesai dengan satu retry.
+    if (mode === 'flaky-once' && !seenOnce.has(tok)) { seenOnce.add(tok); req.socket.destroy(); return; }
     return res.writeHead(200, JSON_H).end(JSON.stringify({
       code: 0, msg: 'ok',
       data: { free_blind_box_info: { status: 2, level: 2, next_time_unix: 3600000 } },
@@ -98,7 +102,14 @@ server.listen(PORT, '127.0.0.1', async () => {
   const n1 = countNotifs();
   console.log(`  → notif terkirim: ${n1}\n`);
 
-  console.log('--- kasus 2: SEMUA akun gagal (masalah nyata) ---');
+  console.log('--- kasus 2: gagal sekali (hiccup), retry menyelamatkan ---');
+  mode = 'flaky-once';
+  const out1b = await runBot();
+  console.log(out1b.split('\n').filter((l) => /Free Box|❌|⏳|✅|notif/.test(l)).join('\n'));
+  const n1b = countNotifs();
+  console.log(`  → notif terkirim: ${n1b}\n`);
+
+  console.log('--- kasus 3: SEMUA akun gagal (masalah nyata) ---');
   mode = 'all-fail';
   const out2 = await runBot();
   console.log(out2.split('\n').filter((l) => /Free Box|❌|notif/.test(l)).join('\n'));
@@ -108,6 +119,8 @@ server.listen(PORT, '127.0.0.1', async () => {
   const checks = [
     ['sebagian gagal (jaringan) → TIDAK spam notif', n1 === 0],
     ['log menyebut notif dilewati', /notif dilewati biar HP nggak spam/.test(out1)],
+    ['hiccup sesaat selesai dengan retry (nggak ada error tersisa)', n1b === 0 && !/❌/.test(out1b)],
+    ['retry menyelamatkan → akun tetap terbaca', /sudah draw/.test(out1b)],
     ['semua gagal → tetap dinotifikasi', n2 > 0],
     ['notif "semua gagal" menyebut jumlah error', /error/.test(out2)],
   ];

@@ -207,10 +207,12 @@ function log(...parts) {
   try { appendFileSync(LOG_FILE, line + '\n'); rotateLogIfNeeded(); } catch { /* abaikan */ }
 }
 
+const NTFY_URL = process.env.BOXKIA_NTFY_URL || 'https://ntfy.sh/';
+
 async function ntfy(title, msg) {
   if (!CFG.ntfyTopic) return;
   try {
-    const res = await fetch('https://ntfy.sh/', {
+    const res = await fetch(NTFY_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ topic: CFG.ntfyTopic, title, message: msg }),
@@ -446,9 +448,16 @@ async function fireBurst(a, accts) {
   });
   const okN = outcomes.filter((o) => o.res.kind === 'ok').length;
   const dupN = outcomes.filter((o) => o.res.kind === 'already').length;
-  const head = `${name} #${a.id} (${a.start_time}) — ✅${okN} ikut · 🟡${dupN} sudah · ⛔${outcomes.length - okN - dupN} gagal · ${Date.now() - started}ms`;
+  const failN = outcomes.length - okN - dupN;
+  const head = `${name} #${a.id} (${a.start_time}) — ✅${okN} ikut · 🟡${dupN} sudah · ⛔${failN} gagal · ${Date.now() - started}ms`;
   log(`📣 ${head}\n${lines.join('\n')}`);
-  await ntfy(okN ? '✅ Boxkia: ikut berhasil' : '⚠️ Boxkia: ada yang gagal', `${head}\n${lines.join('\n')}`);
+  // Judul notif mengikuti kenyataan: kalau TIDAK ada yang ikut tapi juga tidak ada
+  // yang gagal, artinya semua akun sudah ikut lewat runner lain (mis. cloud) — itu
+  // bukan kegagalan dan tidak boleh dibunyikan seperti alarm "ada yang gagal".
+  const title = okN ? '✅ Boxkia: ikut berhasil'
+    : failN === 0 ? '🟡 Boxkia: semua sudah ikut'
+    : '⚠️ Boxkia: ada yang gagal';
+  await ntfy(title, `${head}\n${lines.join('\n')}`);
 }
 
 /* ---------------- laporan hasil undian ---------------- */
