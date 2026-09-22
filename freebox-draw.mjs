@@ -189,21 +189,29 @@ async function main() {
   if (errors.length && !worthNotifying) {
     log(`  (${errors.length} error jaringan sesaat — notif dilewati biar HP nggak spam)`);
   }
+  // Kalau SEMUA akun gagal tapi semuanya cuma masalah jaringan, jangan berteriak
+  // "error" seolah botnya rusak — 22/9 20:41 persis ini yang terjadi (koneksi ke
+  // Boxkia ngadat sesaat, 9/9 request jadwal timeout bersamaan). Judulnya dibuat
+  // jujur menyebut jaringan, dan detailnya menegaskan box TIDAK hilang karena
+  // putaran berikutnya masih mencoba (draw-nya idempoten).
+  const allTransient = errors.length > 0 && hardErrors.length === 0;
   const head = won.length
     ? `🎁 Free Box: ${won.length} MENANG!`
     : ready.length
       ? `🎯 Free Box: ${ready.length} siap draw`
-      : errors.length
-        ? `⚠️ Free Box: ${errors.length} error`
-        : `🎲 Free Box: ${drawn.length} sudah draw`;
+      : allTransient
+        ? `🌐 Free Box: gangguan jaringan (${errors.length} akun)`
+        : errors.length
+          ? `⚠️ Free Box: ${errors.length} error`
+          : `🎲 Free Box: ${drawn.length} sudah draw`;
 
-  const detail = results.map((r) => {
+  const detail = (allTransient ? ['(gangguan jaringan sesaat — dicoba lagi otomatis, box tidak hilang)'] : []).concat(results.map((r) => {
     if (r.kind === 'won') return `🎁 ${r.name}: ${r.prize}`;
     if (r.kind === 'ready') return `🎯 ${r.name}: siap draw`;
     if (r.kind === 'already') return `⏳ ${r.name}: sudah draw`;
     if (r.kind === 'locked') return `🔒 ${r.name}: ${r.msg}`;
     return `❌ ${r.name}: ${r.msg}`;
-  }).join('\n');
+  })).join('\n');
 
   log(head);
   log(detail);

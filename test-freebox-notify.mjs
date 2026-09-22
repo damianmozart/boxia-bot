@@ -109,7 +109,7 @@ server.listen(PORT, '127.0.0.1', async () => {
   const n1b = countNotifs();
   console.log(`  → notif terkirim: ${n1b}\n`);
 
-  console.log('--- kasus 3: SEMUA akun gagal (masalah nyata) ---');
+  console.log('--- kasus 3: SEMUA akun gagal (koneksi ngadat, bukan botnya rusak) ---');
   mode = 'all-fail';
   const out2 = await runBot();
   console.log(out2.split('\n').filter((l) => /Free Box|❌|notif/.test(l)).join('\n'));
@@ -122,7 +122,8 @@ server.listen(PORT, '127.0.0.1', async () => {
     ['hiccup sesaat selesai dengan retry (nggak ada error tersisa)', n1b === 0 && !/❌/.test(out1b)],
     ['retry menyelamatkan → akun tetap terbaca', /sudah draw/.test(out1b)],
     ['semua gagal → tetap dinotifikasi', n2 > 0],
-    ['notif "semua gagal" menyebut jumlah error', /error/.test(out2)],
+    ['semua gagal karena jaringan → judul jujur menyebut jaringan', /🌐 Free Box: gangguan jaringan \(\d+ akun\)/.test(out2)],
+    ['detailnya menegaskan box tidak hilang (dicoba lagi)', /dicoba lagi otomatis, box tidak hilang/.test(out2)],
   ];
 
   console.log('=== hasil verifikasi ===');
