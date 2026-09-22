@@ -288,6 +288,13 @@ ke-restart, dia tidak notif ulang barang yang sudah pernah dilaporkan
   hasil/uangnya terlihat setelah event selesai (cek di aplikasi Boxkia).
 - Waktu dihitung dari countdown server (`diff_time_start`), jadi zona waktu
   perangkatmu tidak memengaruhi akurasi tembakan.
+- **Anti-telat saat koneksi ngadat.** Server Boxkia sesekali menahan koneksi
+  sampai timeout — terukur 9/9 request jadwal gagal bersamaan (22/9 20:41).
+  Karena bot menembak dari data jadwal, kegagalan itu dulu berarti akun tidak
+  punya target → tidak di-arm → baru menembak **setelah** event dibuka. Sekarang
+  jadwal + kelayakan terakhir yang berhasil disimpan sebagai cadangan: kalau
+  fetch gagal di jendela arm (20 detik terakhir), akun tetap di-arm dari data
+  terakhir dan log-nya menandai `🛟 n akun di-arm dari jadwal terakhir`.
 - **Syarat & ketentuan:** memakai bot untuk event seperti ini berpotensi
   melanggar ToS / aturan "keadilan" Boxkia, dan risiko akun dibatasi adalah
   milikmu. Pakai sewajarnya (bukan banjir ribuan request per detik).
@@ -295,7 +302,7 @@ ke-restart, dia tidak notif ulang barang yang sudah pernah dilaporkan
 ## Tes
 
 ```bash
-node test-arm-fire.mjs        # penjadwal ARM→FIRE + laporan hasil + judul notif (24 check)
+node test-arm-fire.mjs        # penjadwal ARM→FIRE + laporan hasil + judul notif + rescue (30 check)
 node test-day-roll.mjs        # reset state "sudah ditembak" saat ganti hari (5 check)
 node test-freebox-notify.mjs  # kebijakan notif free box (anti-spam & anti-alarm palsu) (6 check)
 ```
@@ -306,3 +313,9 @@ kalau tidak, proses yang hidup lebih dari sehari akan melewati semua event
 yang id-nya sudah pernah ditembak — tanpa log. `test-day-roll.mjs` menjaga ini:
 running pertama sengaja tanpa hook pergantian hari dan **harus** cuma menembak
 sekali, running kedua dengan pergantian hari dipaksa dan **harus** menembak lagi.
+
+Jaring pengaman arm (`🛟`) juga diuji dengan pola running control di
+`test-arm-fire.mjs` run 4: mock-nya menahan koneksi jadwal tepat di jendela arm,
+lalu bot dijalankan dua kali — **dengan** fix (harus tetap menembak tepat waktu)
+dan **tanpa** fix lewat hook `BOXKIA_DISABLE_RESCUE_ARM` (harus tidak menembak
+sama sekali). Tes itu merah kalau jaring pengamannya hilang dari kode.

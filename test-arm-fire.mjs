@@ -46,6 +46,11 @@ function schedule() {
           join_total: 0, join_user_limit: 70, limit_price: 0, level_limit: 0,
           diff_time_start: Math.max(0, T0 - Date.now()),
         },
+        ...(rescueAt ? [{
+          id: 1002, type: 1, start_time: 'MOCK 03:00 PM', is_progress: 0, is_join: 0,
+          join_total: 0, join_user_limit: 100, limit_price: 0, level_limit: 0,
+          diff_time_start: Math.max(0, rescueAt - Date.now()),
+        }] : []),
         {
           // event jauh (20 menit lagi) — bot harus keluar cepat, bukan muter-muter
           // nunggu sampai budget habis
@@ -60,6 +65,11 @@ function schedule() {
 
 const notifs = [];       // {title, message} yang ditangkap mock ntfy
 let allDup = false;      // mode "semua akun sudah ikut" buat menguji judul notif
+// Skenario "rescue": tahan koneksi /luckyBag/list (bot timeout) + satu event
+// yang mulai di `rescueAt` — buat menguji jaring pengaman arm.
+let listHangFrom = 0;
+let listHangUntil = 0;
+let rescueAt = 0;
 // token yang /user/info-nya dibikin gagal beberapa kali (meniru rate-limit sesaat),
 // plus sisa berapa kali harus gagal.
 const loginFail = new Map();
@@ -67,7 +77,7 @@ const bucketByToken = new Map();
 const userByToken = new Map();
 function joinResult(token, id) {
   if (allDup) return { code: 1, msg: 'Duplicate participation not allowed' };
-  if (Date.now() < T0) return { code: 1, msg: 'not started yet' };
+  if (Date.now() < (id === 1002 ? rescueAt : T0)) return { code: 1, msg: 'not started yet' };
   if (id === 1001) return { code: 0, msg: 'ok', data: {} }; // free box: selalu sukses
   const bucket = bucketByToken.get(token) ?? 2;
   if (bucket === 0) return { code: 1, msg: 'Duplicate participation not allowed' };
@@ -93,6 +103,8 @@ const server = http.createServer((req, res) => {
     const tok = req.headers.token || 'none';
     if (url.includes('/activity/luckyBag/list')) {
       listCalls.push(Date.now());
+      // skenario rescue: jangan jawab sama sekali → bot melepasnya karena timeout
+      if (listHangFrom && Date.now() >= listHangFrom && Date.now() < listHangUntil) return;
       return res.writeHead(200, JSON_H).end(JSON.stringify(schedule()));
     }
     if (url.includes('/activity/luckyBag/join')) {
@@ -164,7 +176,7 @@ function run(opts = {}) {
       },
     });
     let out = '';
-    const deadline = setTimeout(() => p.kill('SIGKILL'), 45000);
+    const deadline = setTimeout(() => p.kill('SIGKILL'), opts.timeoutMs || 45000);
     p.stdout.on('data', (d) => { out += d; });
     p.stderr.on('data', (d) => { out += d; });
     p.on('close', () => { clearTimeout(deadline); resolve({ out, exitAt: Date.now() }); });
@@ -229,7 +241,47 @@ server.listen(PORT, '127.0.0.1', async () => {
   console.log(`\n=== run 3 (1 akun gagal login sesaat) → ${masuk3} ===`);
   console.log(out3.split('\n').filter((l) => /login ulang|tidak login|akun masuk|🔁/.test(l)).join('\n'));
 
+  // --- run 4: RESCUE — fetch jadwal GAGAL (koneksi ditahan) tepat di jendela arm.
+  // Kejadian nyata 22/9 20:41: 9/9 akun "error fetch list: aborted due to timeout".
+  // Tanpa jaring pengaman, akun yang fetch-nya gagal tidak punya target → tidak
+  // di-arm → baru menembak setelah event mulai (kalah cepat). Kontrolnya dijalankan
+  // dengan BOXKIA_DISABLE_RESCUE_ARM supaya terbukti bedanya.
+  const rescue = [];
+  for (const disable of [false, true]) {
+    joinByEvent.delete(1002);
+    const ra = Date.now() + 12000;
+    const hangFrom = Date.now() + 6000;   // biar ada satu fetch sukses dulu (cache terisi)
+    const hangUntil = Date.now() + 22000;
+    rescueAt = ra;
+    listHangFrom = hangFrom;
+    listHangUntil = hangUntil;
+    const dirR = mkdtempSync(path.join(tmpdir(), 'boxkia-rescue-'));
+    const r = await run({
+      args: [],
+      dataDir: dirR,
+      timeoutMs: 16000,
+      env: {
+        BOXKIA_ARM_WINDOW_MS: '4000',
+        BOXKIA_SCHEDULE_TIMEOUT_MS: '700',
+        BOXKIA_POLL_MS: '1000',
+        BOXKIA_FREEBOX_CHECK_MIN: '0',
+        ...(disable ? { BOXKIA_DISABLE_RESCUE_ARM: '1' } : {}),
+      },
+    });
+    rescue.push({ disable, out: r.out, rescueAt: ra, first: joinByEvent.get(1002)?.first ?? null });
+    rescueAt = 0;
+    listHangFrom = 0;
+    listHangUntil = 0;
+    try { rmSync(dirR, { recursive: true, force: true }); } catch { /* abaikan */ }
+  }
+  const fixR = rescue[0], ctlR = rescue[1];
+  console.log(`\n=== run 4 rescue (fetch jadwal gagal di jendela arm) — dengan fix: join ${fixR.first == null ? 'TIDAK ADA' : (fixR.first - fixR.rescueAt) + 'ms setelah mulai'} · kontrol: ${ctlR.first == null ? 'TIDAK ADA' : (ctlR.first - ctlR.rescueAt) + 'ms setelah mulai'} ===`);
+  console.log(fixR.out.split('\n').filter((l) => /🛟|arm angpao #1002|⚡ angpao #1002/.test(l)).join('\n'));
+
   const checks = [
+    ['rescue: akun tetap di-arm walau fetch jadwal gagal', /🛟 \d+ akun di-arm dari jadwal terakhir/.test(fixR.out)],
+    ['rescue: join mendarat tepat waktu (≤500ms setelah mulai)', fixR.first != null && Math.abs(fixR.first - fixR.rescueAt) <= 500],
+    ['rescue: kontrol tanpa jaring pengaman TIDAK menembak (telat)', ctlR.first == null],
     ['login gagal sesaat → login ulang sebelum laporan', /login ulang berhasil sebelum laporan/.test(out3)],
     ['laporan menghitung SEMUA akun (bukan kurang)', /· (\d+)\/\1 akun masuk/.test(masuk3)],
     ['akun sehat tidak lagi dilabeli "token mati"', !/token mati/.test(out3)],

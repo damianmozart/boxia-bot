@@ -823,6 +823,25 @@ let lastOverview = 0;
 const reportRetry = new Map(); // eventId -> kapan boleh coba laporan lagi (ms)
 const skipLogged = new Map();  // "key:id" -> alasan skip terakhir (biar log nggak spam tiap poll)
 
+/* Jaring pengaman anti-telat untuk ARM.
+ * Server Boxkia sesekali menahan koneksi sampai timeout, dan karena bot polling
+ * jadwal 9 akun PARALEL, kegagalannya bisa bersamaan — kejadian nyata 22/9 20:41:
+ * 9/9 "error fetch list: aborted due to timeout", free box pun ikut gagal 8/8.
+ * Dampaknya halus tapi fatal: akun yang fetch-nya gagal TIDAK punya target →
+ * tidak pernah di-arm → baru menembak setelah event mulai (is_progress === 1),
+ * yaitu SESUDAH kuota diperebutkan. Satu hiccup jaringan = kalah balapan.
+ * Karena itu jadwal & kelayakan terakhir yang BERHASIL kita simpan: kalau fetch
+ * gagal, akun itu tetap di-arm dari data terakhir (servernya sendiri yang akan
+ * menolak kalau ternyata sudah tidak layak — ongkosnya cuma satu request). */
+const lastSeenEvents = new Map();   // eventId -> { a, absStart }
+const lastEligible = new Map();     // acctKey -> Set(eventId)
+
+function rememberEligibility(key, id, ok) {
+  let s = lastEligible.get(key);
+  if (!s) { s = new Set(); lastEligible.set(key, s); }
+  if (ok) s.add(id); else s.delete(id);
+}
+
 /* ---------------- penjadwal presisi: ARM → FIRE ----------------
  * Dulu bot memakai "fast poll": tempur jadwal tiap 250ms di 30 detik terakhir.
  * Dua masalahnya: (1) granularitas poll 250ms bikin tembakan pertama meleset,
@@ -913,6 +932,8 @@ async function loopOnce(forceOverview = false) {
 
     for (const a of list) {
       if (!targetMatch(a) || a.is_progress === 2) continue;
+      // catat jam mulai absolutnya — dipakai sebagai cadangan kalau fetch gagal
+      lastSeenEvents.set(a.id, { a, absStart: fetchTime + (a.diff_time_start ?? 0) });
       if (a.is_join == 1 || joined.get(acct.key)?.has(a.id)) { attempted.get(acct.key).add(a.id); attemptedAny.add(a.id); continue; }
       if (attempted.get(acct.key).has(a.id)) {
         // Sebelumnya ini `continue` senyap — bot lokal yang hidup >1 hari jadi
@@ -926,6 +947,7 @@ async function loopOnce(forceOverview = false) {
       }
       if (armed.get(a.id)?.accts.includes(acct)) continue;
       const why = ineligibleReason(a, spends.get(acct.key), users.get(acct.key));
+      rememberEligibility(acct.key, a.id, !why);
       if (why) {
         // JANGAN tandai attempted — kalau nanti akun jadi eligible (mis. habis belanja),
         // event ini masih bisa ditembak. Log-nya cukup sekali per alasan.
@@ -945,6 +967,36 @@ async function loopOnce(forceOverview = false) {
   const now = Date.now();
   const lead = effectiveLead();
   const fireNow = [];
+
+  // Akun yang fetch jadwalnya gagal di siklus ini: tetap masukkan ke target
+  // memakai jadwal terakhir yang berhasil (lihat lastSeenEvents). Tanpa ini,
+  // timeout sesaat tepat di jendela arm = akun itu telat ikut angpao.
+  // BOXKIA_DISABLE_RESCUE_ARM = hook tes: dipakai sebagai "running control" —
+  // tanpa jaring pengaman, akun yang fetch-nya gagal memang tidak akan menembak.
+  const failedAccts = process.env.BOXKIA_DISABLE_RESCUE_ARM ? [] : eventAccounts().filter((_, i) => !results[i]);
+  if (failedAccts.length) {
+    let rescued = 0;
+    for (const { a, absStart } of lastSeenEvents.values()) {
+      const startsIn = absStart - now;
+      if (startsIn > CFG.armWindowMs || startsIn < -120000) continue;  // belum masuk jendela arm / sudah lewat
+      const accts = failedAccts.filter((acct) =>
+        users.get(acct.key)
+        && lastEligible.get(acct.key)?.has(a.id)
+        && !attempted.get(acct.key)?.has(a.id)
+        && !joined.get(acct.key)?.has(a.id)
+        && !armed.get(a.id)?.accts.includes(acct)
+      );
+      if (!accts.length) continue;
+      if (!targets.has(a.id)) targets.set(a.id, { a: { ...a, diff_time_start: absStart - fetchTime }, accts: [] });
+      const t = targets.get(a.id);
+      for (const acct of accts) {
+        if (t.accts.includes(acct)) continue;
+        t.accts.push(acct);
+        rescued++;
+      }
+    }
+    if (rescued) log(`🛟 ${rescued} akun di-arm dari jadwal terakhir — fetch gagal: ${failedAccts.map((x) => x.name).join(', ')}`);
+  }
   let soonestStartsIn = Infinity;
   for (const { a, accts } of targets.values()) {
     const startsIn = (a.diff_time_start ?? 0) - (now - fetchTime);
@@ -1014,6 +1066,8 @@ function rollStateDayIfNeeded() {
   for (const s of joined.values()) s.clear();
   attemptedAny.clear();
   skipLogged.clear();
+  lastSeenEvents.clear();
+  lastEligible.clear();
   log(`🔄 Ganti hari (${today}) — status "sudah ditembak" di-reset (id event dipakai ulang tiap hari).`);
   return true;
 }
